@@ -1,0 +1,21 @@
+{
+  "name": "econnectivity-triage-agent",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Agent analizy alertów e-Connectivity i wykresów AAA (tylko odczyt)",
+  "main": "live_diagnostic_agent.js",
+  "scripts": {
+    "start": "node live_diagnostic_agent.js",
+    "check": "node --check live_diagnostic_agent.js"
+  },
+  "dependencies": {
+    "pdfkit": "^0.15.0",
+    "playwright": "^1.47.0",
+    "xlsx": "^0.18.5"
+  },
+  "optionalDependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
+    "pngjs": "^7.0.0",
+    "tesseract.js": "^5.1.0"
+  }
+}

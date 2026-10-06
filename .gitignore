@@ -1,0 +1,9 @@
+# Sesja logowania (ciasteczka) — nigdy nie commitować
+session.json
+
+# Dane klientów i wyniki analiz zostają lokalnie (CLAUDE.md, rozdz. 2)
+*.xlsx
+aaa_output_live/
+service_knowledge.json
+
+node_modules/
