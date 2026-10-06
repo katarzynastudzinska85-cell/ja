@@ -7,3 +7,6 @@ aaa_output_live/
 service_knowledge.json
 
 node_modules/
+
+# Paczki do przesłania (budowane lokalnie)
+*.zip
