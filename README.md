@@ -1,0 +1,44 @@
+# Agent analizy alertów e-Connectivity (v3)
+
+Skrypt otwiera dashboard e-Connectivity w Edge, czyta aktywne alerty i wykresy AAA
+i tworzy raport PDF po polsku. Działa tylko w trybie odczytu. Zasady analizy: `CLAUDE.md`.
+
+## Pierwsze uruchomienie (Windows)
+
+1. Zainstaluj Node.js LTS ze strony https://nodejs.org (jednorazowo).
+2. Rozpakuj folder, np. do `C:\eConnectivity`.
+3. Skopiuj do tego folderu bazę Excel `stan Ortho na 23.04.2026.xlsx`.
+   Inna nazwa pliku? Zmień ją w `live_diagnostic_agent.js`, linia 62.
+4. Otwórz PowerShell w tym folderze i wpisz raz:
+
+   ```
+   npm install
+   ```
+
+## Każde kolejne uruchomienie
+
+1. W PowerShell, w folderze skryptu: `npm start`
+2. Otworzy się Edge. Zaloguj się i przejdź do dashboardu z tabelami analizatorów.
+3. Poczekaj, aż tabele się załadują, wróć do PowerShell i naciśnij ENTER.
+4. Wynik: folder `aaa_output_live`
+   - `Raport_Serwisowy_eConnectivity_LIVE_V3.pdf` — raport,
+   - `Service_Triage_Data_LIVE_V3.json` — dane,
+   - podfoldery aparatów z obrazami wykresów.
+
+## Gdy coś nie działa
+
+- **Edge się nie otwiera:** sprawdź, gdzie jest `msedge.exe`. Jeśli w `C:\Program Files\Microsoft\Edge\Application\`,
+  zmień ścieżkę w `live_diagnostic_agent.js`, linia 57.
+- **„Odczyt wartości z wykresów jest wyłączony”:** uruchom ponownie `npm install`.
+- **Raport bez polskich liter:** brak czcionki Arial w `C:\Windows\Fonts`.
+
+## Opcje
+
+- `service_knowledge.json` w folderze skryptu — lista dokumentów serwisowych dopasowywanych do alertów (opcjonalnie).
+- `AAA_VISION=1` i `ANTHROPIC_API_KEY` — odczyt wykresów przez AI. **Wysyła obrazy wykresów na zewnątrz**,
+  domyślnie wyłączone (CLAUDE.md, rozdz. 2).
+- `AAA_LOCAL_CHARTS=0` — wyłącza lokalny odczyt wartości z wykresów.
+
+## Nie udostępniaj
+
+`session.json` (zapisana sesja logowania), pliku Excel ani folderu `aaa_output_live` — zawierają dane klientów.
