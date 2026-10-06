@@ -6,7 +6,8 @@
   "main": "live_diagnostic_agent.js",
   "scripts": {
     "start": "node live_diagnostic_agent.js",
-    "check": "node --check live_diagnostic_agent.js"
+    "check": "node --check live_diagnostic_agent.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "pdfkit": "^0.15.0",

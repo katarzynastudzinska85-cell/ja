@@ -1,5 +1,5 @@
 // ============================================================
-// QUIDELORTHO e-CONNECTIVITY SERVICE TRIAGE AGENT v12
+// QUIDELORTHO e-CONNECTIVITY SERVICE TRIAGE AGENT v3
 // EXCEL ASSET DATABASE + AAA + POLSKI RAPORT FE
 // READ-ONLY
 //
@@ -1107,11 +1107,6 @@ function searchServiceKnowledge(k,r){
   for(const d of k){const title=cleanText(d.title||d.name||d.procedure||d.heading||""), fp=cleanText(d.path||d.file||d.source||""), body=cleanText(d.text||d.content||d.summary||""), mt=cleanText(d.model||d.product||d.family||d.productFamily||"");const hay=`${title} ${fp} ${body} ${mt}`.toLowerCase();let score=0,h=[];if(model&&hay.includes(model))score+=8;if(compact&&hay.includes(compact))score+=5;for(const t of terms){if(title.toLowerCase().includes(t)){score+=5;h.push(t)}else if(fp.toLowerCase().includes(t)){score+=3;h.push(t)}else if(hay.includes(t)){score+=1;h.push(t)}}for(const c of (r.genericEvidence?.conditionCodes||[])){if(hay.includes(c.toLowerCase())){score+=12;h.push(c)}}if(score>=8&&h.length)out.push({title:title||path.basename(fp)||"Dokument serwisowy",path:fp,score,matchedTerms:[...new Set(h)].slice(0,12)})}
   return out.sort((x,y)=>y.score-x.score).slice(0,10)
 }
-function genericLiveAnalysis(r){
-  const rules=r.genericEvidence?.rules||[],codes=r.genericEvidence?.conditionCodes||[],docs=r.serviceDocuments||[];
-  if(/data\s*logger/i.test(r.alertName||""))return{priority:"ZDALNA WERYFIKACJA",decision:"REMOTE ONLY",problem:"e-Connectivity zgłasza brak lub opóźnienie danych z analizatora.",since:`Last Connected: ${r.dataLogger?.lastConnected||"brak pewnego odczytu"}.`,evidence:`AAA: ${rules.length} reguł/parametrów; ${codes.length} condition codes; ${r.chartFiles.length} wykresów.`,interpretation:"Sam Data Logger Status nie potwierdza awarii mechanicznej analizatora.",cause:"Najpierw zweryfikować dostępność analizatora, transmisję i e-Connectivity.",actions:["Sprawdzić Last Connected oraz A-file/B-file upload status.","Potwierdzić, czy analizator jest uruchomiony i dostępny.","Sprawdzić pozostałe aktywne alerty techniczne tego aparatu.","Wyjazd FSE rozważyć po wykluczeniu problemu komunikacyjnego."],conclusion:"Najpierw diagnostyka zdalna."};
-  return{priority:r.status==="ORANGE"?"POMARAŃCZOWY":"ŻÓŁTY",decision:r.status==="ORANGE"?"WYMAGA OCENY SERWISOWEJ":"MONITOROWAĆ / OCENIĆ",problem:`Aktywny alert: ${r.alertName}.`,since:r.dateRange?.start?`Zakres danych AAA: ${r.dateRange.start} – ${r.dateRange.end}.`:"AAA nie podało pewnego początku problemu.",evidence:`AAA zweryfikowane dla J${r.jno}. Reguły/progi/parametry: ${rules.length}. Condition codes: ${codes.length?codes.join(", "):"brak pewnego odczytu"}. Wykresy: ${r.chartFiles.length}. Dokumenty ServicePublications: ${docs.length}.`,interpretation:r.chartFiles.length?(()=>{const cd=(r.chartData||[]);const withVals=cd.filter(c=>c.points&&c.points.length).length;const ai=cd.filter(c=>c.vision).length;const loc=cd.filter(c=>c.local&&c.local.ok).length;const fin=cd.flatMap(c=>describeLocalChart(c.local,r.dateRange).findings).slice(0,6);return `Wykresy źródłowe zapisano. Odczyt lokalny z obrazu: ${loc}/${r.chartFiles.length}; wartości ze strony: ${withVals}/${r.chartFiles.length}; odczyt AI: ${ai}/${r.chartFiles.length}.${fin.length?" Kluczowe odczyty: "+fin.join(" "):" Brak odczytu = wartości trzeba ocenić z samego wykresu."}`})():"Brak wykresów nie jest interpretowany jako brak problemu.",cause:docs.length?`Dopasowano dokumentację ServicePublications dla ${r.model}; należy skorelować ją z evidence AAA.`:"Brak wystarczająco pewnego dopasowania dokumentacji — bez zgadywania przyczyny.",actions:["Porównać evidence AAA z progami opisanymi przez AAA.","Sprawdzić powiązane condition codes.",...docs.slice(0,5).map(d=>`Dokumentacja: ${d.title}`),"Nie wykonywać adjustmentów ani zmian konfiguracji automatycznie."],conclusion:r.status==="ORANGE"?"Alert pomarańczowy wymaga oceny FSE; pilność musi wynikać z evidence, nie tylko z koloru.":"Alert żółty wymaga oceny trendu i evidence."}
-}
 
 // ============================================================
 // DATE RANGE
@@ -1741,6 +1736,53 @@ function buildChartReader() {
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
   }
 
+  // Odcinki, w których mediany kolumn leżą na prostej (±1 px), dłuższe niż minLen
+  // i z różnicą wysokości ≥ 2 px. Tak AAA rysuje lukę w danych.
+  function findLinearRuns(pts, minLen) {
+    const runs = [];
+    let i = 0;
+    while (i < pts.length - 2) {
+      let best = -1;
+      for (let j = i + 2; j < pts.length && pts[j].x - pts[j - 1].x <= 2; j++) {
+        const a = pts[i], b = pts[j], slope = (b.y - a.y) / (b.x - a.x);
+        let fits = true;
+        for (let k = i + 1; k < j; k++) {
+          if (Math.abs(a.y + slope * (pts[k].x - a.x) - pts[k].y) > 1) { fits = false; break; }
+        }
+        if (!fits) break;
+        best = j;
+      }
+      if (best > 0 && pts[best].x - pts[i].x >= minLen && Math.abs(pts[best].y - pts[i].y) >= 2) {
+        runs.push({ x0: pts[i].x, x1: pts[best].x });
+        i = best;
+      } else {
+        i++;
+      }
+    }
+    return runs;
+  }
+
+  // Typowa "chropowatość" serii: mediana |2. różnicy| median kolumn (w pikselach).
+  function roughness(pts) {
+    const d = [];
+    for (let i = 1; i < pts.length - 1; i++) {
+      if (pts[i].x - pts[i - 1].x === 1 && pts[i + 1].x - pts[i].x === 1) {
+        d.push(Math.abs(pts[i + 1].y - 2 * pts[i].y + pts[i - 1].y));
+      }
+    }
+    return d.length ? median(d) : 0;
+  }
+
+  function mergeRuns(runs) {
+    const out = [];
+    for (const r of [...runs].sort((a, b) => a.x0 - b.x0)) {
+      const last = out[out.length - 1];
+      if (last && r.x0 <= last.x1) last.x1 = Math.max(last.x1, r.x1);
+      else out.push({ ...r });
+    }
+    return out;
+  }
+
   async function readChart(buffer, worker, opts = {}) {
     const img = decode(buffer);
     const result = { ok: false, reason: "", title: "", axis: null, thresholds: [], series: [] };
@@ -1826,8 +1868,10 @@ function buildChartReader() {
       }
       if (total < 25) continue;
 
-      // Poziome linie = progi (wypełniają większość szerokości wykresu).
-      const lineRows = [...rowCount.entries()].filter(([, n]) => n >= 0.6 * plotW).map(([y]) => y).sort((a, b) => a - b);
+      // Poziome linie = progi (wypełniają większość szerokości wykresu). Tylko kolory progów
+      // (fioletowy, żółty, CLAUDE.md 5.1) — płaska seria nie jest progiem.
+      const lineRows = col.kind !== "threshold" ? [] :
+        [...rowCount.entries()].filter(([, n]) => n >= 0.6 * plotW).map(([y]) => y).sort((a, b) => a - b);
       const thrCenters = groupRows(lineRows);
 
       for (const c of thrCenters) {
@@ -1851,28 +1895,41 @@ function buildChartReader() {
       if (col.kind === "threshold" && thrCenters.length) continue;
 
       const medians = [];
-      let minY = Infinity, maxY = -Infinity;
       for (const [x, ys] of [...colsMap.entries()].sort((a, b) => a[0] - b[0])) {
         const clean = ys.filter(y => !skip.has(y));
         if (!clean.length) continue;
-        medians.push({ x, y: median(clean) });
-        minY = Math.min(minY, ...clean);
-        maxY = Math.max(maxY, ...clean);
+        medians.push({ x, y: median(clean), top: Math.min(...clean), bottom: Math.max(...clean) });
       }
       if (medians.length < 8) continue;
 
-      const vals = medians.map(m => valueAt(m.y));
+      // Luki w danych (CLAUDE.md 5.3): AAA łączy je prostą linią. Odcinek idealnie liniowy,
+      // dłuższy niż ~3% szerokości i nie poziomy, traktujemy jako lukę i usuwamy ze statystyk.
+      // Poziome plateau (np. nasycenie 100%) zostaje w danych.
+      // W serii gładkiej (np. powolna zmiana temperatury) prosty odcinek może być prawdziwymi danymi,
+      // więc tam oznaczamy go tylko jako możliwą lukę i nie usuwamy.
+      const minGapPx = Math.max(6, 0.03 * plotW);
+      const linearRuns = findLinearRuns(medians, minGapPx);
+      const noisy = roughness(medians) >= 0.5;
+      const gapRuns = noisy ? linearRuns : [];
+      // Gdy "liniowa" jest ponad połowa szerokości, seria jest po prostu gładka — nic nie oznaczamy.
+      const suspectedAll = noisy ? [] : mergeRuns(linearRuns);
+      const suspected = suspectedAll.reduce((n, g) => n + g.x1 - g.x0, 0) > 0.5 * plotW ? [] : suspectedAll;
+      for (let i = 1; i < medians.length; i++) {
+        if (medians[i].x - medians[i - 1].x > minGapPx) gapRuns.push({ x0: medians[i - 1].x, x1: medians[i].x });
+      }
+      const gaps = mergeRuns(gapRuns);
+      const kept = medians.filter(m => !gaps.some(g => m.x > g.x0 && m.x < g.x1));
+      if (kept.length < 8) continue;
+
+      const vals = kept.map(m => valueAt(m.y));
       const q = Math.max(1, Math.floor(vals.length / 4));
       const avg = a => a.reduce((s, v) => s + v, 0) / a.length;
 
-      const maxVal = valueAt(minY);
-      const minVal = valueAt(maxY);
-      const maxCol = medians.reduce((b, m) => (m.y < b.y ? m : b), medians[0]);
-      const minCol = medians.reduce((b, m) => (m.y > b.y ? m : b), medians[0]);
-
-      // Luki w danych: odcinki >3% szerokości bez pikseli serii.
-      let longestGap = 0;
-      for (let i = 1; i < medians.length; i++) longestGap = Math.max(longestGap, medians[i].x - medians[i - 1].x);
+      const maxVal = valueAt(Math.min(...kept.map(m => m.top)));
+      const minVal = valueAt(Math.max(...kept.map(m => m.bottom)));
+      const maxCol = kept.reduce((b, m) => (m.y < b.y ? m : b), kept[0]);
+      const minCol = kept.reduce((b, m) => (m.y > b.y ? m : b), kept[0]);
+      const gapWidth = gaps.reduce((sum, g) => sum + (g.x1 - g.x0), 0);
 
       const s = {
         color: col.name,
@@ -1886,7 +1943,17 @@ function buildChartReader() {
         maxAt: (maxCol.x - left) / plotW,
         minAt: (minCol.x - left) / plotW,
         coverage: Number((medians.length / plotW).toFixed(3)),
-        gapShare: Number((longestGap / plotW).toFixed(3)),
+        gapShare: Number((gapWidth / plotW).toFixed(3)),
+        gaps: gaps.map(g => ({
+          from: Number(((g.x0 - left) / plotW).toFixed(4)),
+          to: Number(((g.x1 - left) / plotW).toFixed(4))
+        })),
+        suspectedGaps: suspected.map(g => ({
+          from: Number(((g.x0 - left) / plotW).toFixed(4)),
+          to: Number(((g.x1 - left) / plotW).toFixed(4))
+        })),
+        // Próbki bez luk: [ułamek osi X, wartość] — do analizy wg typu alertu i wykresów odtworzonych.
+        samples: kept.map(m => [Number(((m.x - left) / plotW).toFixed(4)), Number(valueAt(m.y).toFixed(places))]),
         versus: []
       };
 
@@ -2016,21 +2083,43 @@ async function readChartsLocally(chartFiles) {
 
 // --- formatowanie wyników odczytu -------------------------------------------
 
+// Format dashboardu: "9/24/2026 6:53:00 PM" (godzina może być pominięta).
 function parseUsDateTime(value) {
   const m = String(value || "").match(
-    /(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/
+    /(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)?)?/i
   );
   if (!m) return null;
-  return new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]), Number(m[4]), Number(m[5]), Number(m[6] || 0));
+  let hour = Number(m[4] || 0);
+  const ampm = String(m[7] || "").toUpperCase();
+  if (ampm === "PM" && hour < 12) hour += 12;
+  if (ampm === "AM" && hour === 12) hour = 0;
+  return new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]), hour, Number(m[5] || 0), Number(m[6] || 0));
 }
 
+function fmtPlDateTime(date) {
+  const p = n => String(n).padStart(2, "0");
+  return `${p(date.getDate())}.${p(date.getMonth() + 1)}.${date.getFullYear()} ${p(date.getHours())}:${p(date.getMinutes())}`;
+}
+
+// Czas z osi X wykresu: oś przyjęta jako liniowa na zakres dat AAA, błąd ±1–2 h (CLAUDE.md 3, 5.1).
 function approxTimeText(dateRange, fraction) {
   const a = parseUsDateTime(dateRange && dateRange.start);
   const b = parseUsDateTime(dateRange && dateRange.end);
   if (!a || !b || fraction === undefined || fraction === null) return "";
   const t = new Date(a.getTime() + Math.max(0, Math.min(1, fraction)) * (b.getTime() - a.getTime()));
   const p = n => String(n).padStart(2, "0");
-  return ` (~${p(t.getDate())}.${p(t.getMonth() + 1)} ${p(t.getHours())}:${p(t.getMinutes())})`;
+  return ` (ok. ${p(t.getDate())}.${p(t.getMonth() + 1)} ${p(t.getHours())}:00)`;
+}
+
+function rangeHours(dateRange) {
+  const a = parseUsDateTime(dateRange && dateRange.start);
+  const b = parseUsDateTime(dateRange && dateRange.end);
+  return a && b && b > a ? (b - a) / 3.6e6 : null;
+}
+
+function gapDurationText(dateRange, gap) {
+  const h = rangeHours(dateRange);
+  return h ? ` (brak danych ok. ${Math.max(1, Math.round((gap.to - gap.from) * h))} h)` : "";
 }
 
 function fmtChartNum(n, resolution) {
@@ -2071,13 +2160,17 @@ function describeLocalChart(local, dateRange) {
       `trend ${sf(s.trend)} (ostatnia ćwiartka vs pierwsza)`;
 
     if (s.coverage < 0.6) line += " — seria częściowo zasłonięta inną, zakres szacunkowy";
-    if (s.gapShare > 0.05) line += ` — luka w danych ok. ${pct(s.gapShare)} zakresu`;
-    lines.push(line);
-
-    const byColor = new Map();
-    for (const t of local.thresholds) {
-      byColor.set(t.color, (byColor.get(t.color) || 0) + 1);
+    if (s.gaps && s.gaps.length) {
+      line += ` — luki w danych usunięte ze statystyk: ${s.gaps
+        .map(g => `${pct(g.from)}–${pct(g.to)} osi${gapDurationText(dateRange, g)}`)
+        .join(", ")}`;
     }
+    if (s.suspectedGaps && s.suspectedGaps.length) {
+      line += ` — możliwe luki (odcinki liniowe w gładkiej serii, nie usunięto): ${s.suspectedGaps
+        .map(g => `${pct(g.from)}–${pct(g.to)} osi`)
+        .join(", ")}`;
+    }
+    lines.push(line);
 
     for (const v of s.versus) {
       lines.push(
@@ -2148,38 +2241,6 @@ function describeLocalChart(local, dateRange) {
   }
 
   return { lines, findings };
-}
-
-function chartKey(title) {
-  return String(title || "")
-    .replace(/\s*--?\s*[A-Z]?\d{5,}\s*$/i, "")
-    .replace(/[^A-Za-z0-9()\s.]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function buildChartComparison(results) {
-  const groups = new Map();
-
-  for (const r of results) {
-    for (const c of r.chartData || []) {
-      const local = c.local;
-      if (!local || !local.ok || !local.series.length) continue;
-      const key = chartKey(local.title);
-      if (!key) continue;
-      if (!groups.has(key)) groups.set(key, { title: local.title, rows: [] });
-      const s = local.series[0];
-      groups.get(key).rows.push({
-        jno: r.jno,
-        res: local.axis.resolution,
-        last: s.last, avg: s.avg, max: s.max, min: s.min, trend: s.trend,
-        thr: local.thresholds.map(t => t.value)
-      });
-    }
-  }
-
-  return [...groups.values()].filter(g => g.rows.length >= 2);
 }
 
 // ============================================================
@@ -2436,1000 +2497,1287 @@ async function collectChartData(page, chartFiles) {
 }
 
 // ============================================================
-// ANALYSIS
+// ANALYSIS (CLAUDE.md, rozdz. 3, 5.2, 6, 7)
+// - każde zdanie ma status: Fakt / Odczyt / Hipoteza / Zalecenie
+// - priorytet wynika z dowodów, nie z koloru alertu
+// - progi zawsze z konkretnego wykresu, nie z założeń
 // ============================================================
 
-function analyzeAlert(result) {
-  const name =
-    String(
-      result.alertName || ""
-    ).toLowerCase();
+const PRIORITY_ORDER = ["WYSOKI", "ŚREDNI", "ZDALNIE", "NISKI"];
 
-  // ----------------------------------------------------------
-  // DATA LOGGER
-  // ----------------------------------------------------------
+const PRIORITY_TERM = {
+  WYSOKI: "najbliższa możliwa wizyta",
+  "ŚREDNI": "zdalna weryfikacja / planowa wizyta",
+  ZDALNIE: "od razu, zdalnie",
+  NISKI: "obserwacja"
+};
 
-  if (
-    name.includes(
-      "data logger"
-    )
-  ) {
-    let since =
-      "Nie udało się ustalić ostatniego połączenia.";
+function fmtN(n, places = 1) {
+  return Number.isFinite(n) ? n.toFixed(places).replace(".", ",") : "?";
+}
 
-    if (
-      result.dataLogger
-        ?.lastConnected
-    ) {
-      since =
-        `Ostatnie połączenie zarejestrowane przez e-Connectivity: ${result.dataLogger.lastConnected}.`;
+function plural(n, one, few, many) {
+  const word = n === 1 ? one : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) ? few : many;
+  return `${n} ${word}`;
+}
+
+function fmtPct(share) {
+  return `${fmtN(share * 100, 0)}%`;
+}
+
+function fmtHours(h) {
+  if (!Number.isFinite(h)) return "";
+  return h >= 1 ? `${fmtN(h, h >= 10 ? 0 : 1)} h` : `${Math.max(1, Math.round(h * 60))} min`;
+}
+
+// Tytuły pochodzą z OCR, więc dopasowanie jest luźne (np. "Buty Cycle" = "Duty Cycle").
+function chartKind(title) {
+  const t = String(title || "").toLowerCase();
+  if (/diff|erence/.test(t)) return "thermDiff";
+  if (/duty|cycle/.test(t)) return "duty";
+  if (/ambi|bient/.test(t)) return "ambient";
+  if (/therm|mistor/.test(t)) return "thermistors";
+  if (/slot|correct/.test(t)) return "slotCorr";
+  if (/step|loss/.test(t)) return "stepLoss";
+  if (/stopp/.test(t)) return "cmStopping";
+  if (/sync/.test(t)) return "readSync";
+  return "";
+}
+
+const CHART_KIND_LABEL = {
+  duty: "Duty Cycle",
+  ambient: "Ambient Temperature",
+  thermistors: "Thermistors",
+  thermDiff: "Thermistor Difference",
+  slotCorr: "Slot Corrections",
+  stepLoss: "Step Loss",
+  cmStopping: "CM RING Stopping",
+  readSync: "READ SYNC"
+};
+
+function alertFamily(alertName) {
+  const n = String(alertName || "").toLowerCase();
+  if (/data\s*logger/.test(n)) return "dataLogger";
+  if (/thermal/.test(n)) return "supplyThermal";
+  if (/ring/.test(n) && /(cm|slide)/.test(n)) return "cmRing";
+  return "generic";
+}
+
+function editDistance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+  }
+  return d[a.length][b.length];
+}
+
+// Walidacja odczytu wykresu (CLAUDE.md 5.2). J-number w tytule pochodzi z OCR:
+// zgodny = identyczny; 1 znak różnicy = prawdopodobnie błąd OCR (odczyt niepewny);
+// ≥ 2 znaki różnicy = wykres innego aparatu.
+function titleJnoCheck(title, jno) {
+  const want = String(jno || "").replace(/\D/g, "");
+  const tail = String(title || "").split(/\s[-—–]+\s|J(?=[\dOoIl(])/).pop() || "";
+  const found = String(title || "").match(/\d{5,}/g) || [];
+  const tailDigits = tail
+    .replace(/[OoQD()¢]/g, "0").replace(/[Il|!]/g, "1").replace(/S/g, "5").replace(/B/g, "8")
+    .replace(/\D/g, "");
+  if (tailDigits.length >= 5 && !found.includes(tailDigits)) found.push(tailDigits);
+  if (!want || !found.length) return { ok: null, found: found.join(", "), fuzzy: false };
+  if (found.includes(want)) return { ok: true, found: found.join(", "), fuzzy: false };
+  const dist = Math.min(...found.map(f => editDistance(f, want)));
+  return dist <= 1
+    ? { ok: true, found: found.join(", "), fuzzy: true }
+    : { ok: false, found: found.join(", "), fuzzy: false };
+}
+
+function validateCharts(result) {
+  const usable = [];
+
+  for (const c of result.chartData || []) {
+    const local = c.local;
+    const title = c.title || (local && local.title) || "";
+    c.kind = chartKind(title);
+    c.titleCheck = titleJnoCheck(title, result.jno);
+
+    if (!local || !local.ok) {
+      c.validity = "brak odczytu";
+      continue;
     }
 
-    return {
-      priority:
-        "ŻÓŁTY",
+    const problems = [];
+    const { top, bottom, resolution, ocrAgreement } = local.axis;
 
-      decision:
-        "NAJPIERW WERYFIKACJA ZDALNA",
+    if (c.titleCheck.ok === false) problems.push(`numer w tytule (${c.titleCheck.found}) inny niż J${result.jno}`);
+    if (c.titleCheck.ok === null) problems.push("nie odczytano J-number z tytułu");
+    if (c.titleCheck.fuzzy) problems.push(`J-number w tytule odczytany jako ${c.titleCheck.found} (1 znak różnicy, prawdopodobnie błąd OCR)`);
+    if (ocrAgreement < 3) problems.push("skala osi Y potwierdzona przez mało etykiet");
+    if (local.thresholds.some(t => t.value < bottom - resolution || t.value > top + resolution)) {
+      problems.push("próg poza zakresem osi");
+    }
+    if (local.series.length && local.series.every(s => s.pixels < 60)) problems.push("mało pikseli serii");
 
-      problem:
-        "e-Connectivity nie otrzymuje aktualnych danych z analizatora. Sam Data Logger Status nie potwierdza awarii mechanicznej analizatora.",
+    c.validity = problems.length ? `odczyt niepewny: ${problems.join("; ")}` : "wiarygodny";
 
-      since,
+    // Wykres innego aparatu nie wchodzi do analizy.
+    if (c.titleCheck.ok === false) continue;
 
-      evidence:
-        "Należy ocenić Last Connected oraz status wysyłania A-file i B-file. Brak plików przez kolejne dni wskazuje przede wszystkim na problem z dostępnością danych lub komunikacją.",
-
-      interpretation:
-        "Pomarańczowy Data Logger nie powinien automatycznie powodować wyjazdu FE. Najpierw należy potwierdzić, czy analizator pracuje oraz czy działa jego połączenie e-Connectivity.",
-
-      cause:
-        "Najbardziej prawdopodobny kierunek: komunikacja e-Connectivity, brak transmisji danych, wyłączony analizator albo problem po stronie połączenia.",
-
-      actions: [
-        "Sprawdzić, czy analizator jest uruchomiony i pracuje.",
-        "Zweryfikować zdalnie e-Connectivity.",
-        "Sprawdzić Last Connected.",
-        "Sprawdzić A-file i B-file upload status.",
-        "Sprawdzić, czy analizator posiada inne aktywne alerty techniczne.",
-        "Wyjazd FSE planować dopiero, jeżeli problemu nie można rozwiązać zdalnie lub występują inne objawy."
-      ],
-
-      conclusion:
-        "Na podstawie samego Data Logger nie ma podstaw do pilnego wyjazdu FE."
-    };
+    usable.push({ ...c, title, uncertain: problems.length > 0 });
   }
 
-  // ----------------------------------------------------------
-  // SUPPLY 3 THERMAL
-  // ----------------------------------------------------------
+  return usable;
+}
 
-  if (
-    name.includes(
-      "supply 3 thermal"
-    )
-  ) {
-    return {
-      priority:
-        "POMARAŃCZOWY",
+function pickChart(charts, kind) {
+  return charts.find(c => c.kind === kind && c.local.series.length) ||
+    charts.find(c => c.kind === kind) ||
+    null;
+}
 
-      decision:
-        "ZAPLANOWAĆ WIZYTĘ FE",
+function mainSeries(chart) {
+  return (chart && chart.local.series[0]) || null;
+}
 
-      problem:
-        "Alert dotyczy układu termicznego Supply 3.",
+function uncertainTag(chart) {
+  return chart && chart.uncertain ? " (odczyt niepewny)" : "";
+}
 
-      since:
-        result.dateRange.start
-          ? `AAA przedstawia dane od ${result.dateRange.start} do ${result.dateRange.end}.`
-          : "Nie ustalono dokładnego początku problemu.",
-
-      evidence:
-        "Należy wspólnie ocenić oba thermistory, Thermistor Difference, Duty Cycle oraz Ambient Temperature. Wykresy AAA są dołączone do raportu.",
-
-      interpretation:
-        "Jeżeli oba thermistory przebiegają podobnie, a Thermistor Difference pozostaje niski, natomiast Duty Cycle często przekracza 85% lub osiąga 100%, bardziej prawdopodobnym kierunkiem jest spadek wydajności układu termicznego niż rozbieżność samych czujników.",
-
-      cause:
-        "Możliwy problem z wydajnością układu termicznego: przepływ powietrza, wentylator, zabrudzenie, cover/load door, heat pump lub jego połączenia. Thermistor należy podejrzewać szczególnie przy nieprawidłowej wartości lub dużej różnicy między czujnikami.",
-
-      actions: [
-        "Porównać Thermistor Right Side i Thermistor Left Side.",
-        "Sprawdzić Thermistor Difference.",
-        "Ocenić Duty Cycle, szczególnie okresy powyżej 85% i przy 100%.",
-        "Ocenić Ambient Temperature.",
-        "Sprawdzić warunki wentylacji analizatora.",
-        "Sprawdzić cover/load door.",
-        "Sprawdzić wentylator i zabrudzenia.",
-        "Sprawdzić heat pump i jego połączenia zgodnie z procedurą serwisową."
-      ],
-
-      conclusion:
-        "Zalecana planowana wizyta FE. Dokładną przyczynę należy potwierdzić na podstawie parametrów i kontroli mechaniczno-termicznej."
-    };
+// Wartość serii w punkcie osi X (najbliższa próbka w promieniu 1% szerokości).
+function sampleAt(series, f) {
+  if (!series || !series.samples || !series.samples.length) return null;
+  const arr = series.samples;
+  let lo = 0, hi = arr.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid][0] < f) lo = mid + 1; else hi = mid;
   }
+  let best = arr[lo];
+  if (lo > 0 && Math.abs(arr[lo - 1][0] - f) < Math.abs(best[0] - f)) best = arr[lo - 1];
+  return Math.abs(best[0] - f) <= 0.01 ? best[1] : null;
+}
 
-  // ----------------------------------------------------------
-  // CM RING
-  // ----------------------------------------------------------
-
-  if (
-    name.includes("cm") &&
-    name.includes("ring")
-  ) {
-    return {
-      priority:
-        "POMARAŃCZOWY",
-
-      decision:
-        "ZAPLANOWAĆ WIZYTĘ FE",
-
-      problem:
-        "Alert dotyczy ruchu i pozycjonowania Slide (CM) Ring.",
-
-      since:
-        result.dateRange.start
-          ? `AAA przedstawia trend od ${result.dateRange.start} do ${result.dateRange.end}.`
-          : "Nie ustalono dokładnego początku problemu.",
-
-      evidence:
-        "Kluczowe jest porównanie Step Loss oraz Slot Corrections. Step Loss i liczba korekcji opisują różne zachowania mechanizmu i nie powinny być traktowane jako ten sam parametr.",
-
-      interpretation:
-        "Jeżeli Step Loss pozostaje stabilny, ale Slot Corrections rośnie lub utrzymuje się na podwyższonym poziomie, analizator nadal osiąga pozycję, lecz potrzebuje większej liczby korekcji. Taki obraz bardziej wskazuje na zwiększony opór lub pogarszającą się mechanikę pozycjonowania niż na klasyczne gubienie kroków.",
-
-      cause:
-        "Główne elementy do kontroli według AAA: CM Rotor belt i tracking, CM/RT Drive Motor oraz pinion, SAG rollers/bearings/spacers, Z-axis bearing pads oraz adjustment values związane z ruchem CM Ring.",
-
-      actions: [
-        "Ocenić trend Step Loss.",
-        "Ocenić trend i zmienność Slot Corrections.",
-        "Sprawdzić CM Rotor belt pod kątem zużycia i uszkodzeń.",
-        "Sprawdzić belt tracking na CM/RT Drive Motor pinion.",
-        "Sprawdzić CM/RT Drive Motor oraz pinion.",
-        "Sprawdzić SAG rollers i bearings.",
-        "Sprawdzić spacers SAG.",
-        "Sprawdzić Z-axis bearing pads.",
-        "Zweryfikować CM RING Stopping.",
-        "Zweryfikować READ SYNC.",
-        "Adjustment wykonywać dopiero po ocenie mechaniki i zgodnie z procedurą serwisową."
-      ],
-
-      conclusion:
-        "Zalecana planowana wizyta FE. Wzrost Step Loss lub pojawienie się powiązanych condition codes powinno zwiększyć priorytet."
-    };
+// Kolejne próbki spełniające warunek, bez przerw dłuższych niż maxStep.
+function episodes(samples, pred, maxStep = 0.01) {
+  const out = [];
+  let cur = null;
+  for (const [f, v] of samples) {
+    if (pred(v)) {
+      if (cur && f - cur.to <= maxStep) { cur.to = f; cur.n++; }
+      else { cur = { from: f, to: f, n: 1 }; out.push(cur); }
+    } else {
+      cur = null;
+    }
   }
+  return out;
+}
 
-  // ----------------------------------------------------------
-  // GENERIC
-  // ----------------------------------------------------------
+function mean(values) {
+  return values.length ? values.reduce((a, b) => a + b, 0) / values.length : NaN;
+}
 
+function correlation(pairs) {
+  if (pairs.length < 10) return null;
+  const mx = mean(pairs.map(p => p[0])), my = mean(pairs.map(p => p[1]));
+  let sxy = 0, sxx = 0, syy = 0;
+  for (const [x, y] of pairs) { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; syy += (y - my) ** 2; }
+  return sxx && syy ? sxy / Math.sqrt(sxx * syy) : null;
+}
+
+function linearFit(pairs) {
+  if (pairs.length < 20) return null;
+  const xs = pairs.map(p => p[0]);
+  const mx = mean(xs), my = mean(pairs.map(p => p[1]));
+  let sxy = 0, sxx = 0;
+  for (const [x, y] of pairs) { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; }
+  if (!sxx) return null;
+  const b = sxy / sxx;
+  return { a: my - b * mx, b, xMin: Math.min(...xs), xMax: Math.max(...xs), n: pairs.length };
+}
+
+// Punkt podziału maksymalizujący różnicę średnich (skok poziomu, CLAUDE.md 6.2).
+function levelShift(samples, minShare = 0.1) {
+  const n = samples.length;
+  const m = Math.max(5, Math.floor(n * minShare));
+  if (n < 2 * m) return null;
+  const prefix = [0];
+  for (const [, v] of samples) prefix.push(prefix[prefix.length - 1] + v);
+  let best = null;
+  for (let k = m; k <= n - m; k++) {
+    const before = prefix[k] / k;
+    const after = (prefix[n] - prefix[k]) / (n - k);
+    if (!best || Math.abs(after - before) > Math.abs(best.after - best.before)) {
+      best = { at: samples[k][0], before, after };
+    }
+  }
+  return best;
+}
+
+function newAnalysis(result, family) {
   return {
-    priority:
-      result.status === "ORANGE"
-        ? "POMARAŃCZOWY"
-        : "ŻÓŁTY",
-
-    decision:
-      result.status === "ORANGE"
-        ? "WYMAGA OCENY SERWISOWEJ"
-        : "MONITOROWAĆ",
-
-    problem:
-      "Wykryto aktywny alert bez dedykowanego modułu analitycznego.",
-
-    since:
-      "Nie ustalono dokładnego początku problemu.",
-
-    evidence:
-      "Dane AAA zostały zebrane, ale agent nie tworzy niepotwierdzonej diagnozy.",
-
-    interpretation:
-      "Alert wymaga oceny FSE.",
-
-    cause:
-      "Nie ustalono.",
-
-    actions: [
-      "Przeanalizować wykresy AAA.",
-      "Sprawdzić Related Condition Codes.",
-      "Skorelować alert z objawami klienta."
-    ],
-
-    conclusion:
-      "Wymaga dalszej oceny."
+    family,
+    priority: "",
+    priorityReason: "",
+    problem: "",
+    missing: [],
+    readings: [],      // { param, value, ref, assessment }
+    observations: [],  // { status: "Fakt" | "Odczyt", text }
+    hypotheses: [],    // tekst zaczynający się od "Hipoteza:"
+    actions: [],       // { text, criterion, mode }
+    dutyFit: null
   };
 }
 
-// ============================================================
-// PDF
-// ============================================================
+function checkCompleteness(result, A, requiredKinds, charts) {
+  if (!result.alertName || result.alertName === "Alert AAA") A.missing.push("typ alertu (nie odczytano nazwy)");
+  if (!result.jno) A.missing.push("J-number");
+  if (!result.dateRange || !result.dateRange.start) A.missing.push("zakres dat AAA");
+  if (!(result.genericEvidence && result.genericEvidence.rules.length)) A.missing.push("reguły/progi w tekście AAA");
+  if (!result.chartFiles.length) A.missing.push("wykresy AAA");
+  for (const kind of requiredKinds) {
+    if (!pickChart(charts, kind)) A.missing.push(`wykres ${CHART_KIND_LABEL[kind]} (brak lub brak pewnego odczytu)`);
+  }
+}
 
-function generatePDF(
-  results,
-  analyzerCount
-) {
-  return new Promise(
-    (resolve, reject) => {
+function addDocsActions(result, A) {
+  for (const d of (result.serviceDocuments || []).slice(0, 3)) {
+    A.actions.push({ text: `Sprawdzić dokument: ${d.title}.`, criterion: "", mode: "na miejscu" });
+  }
+}
 
-      const doc =
-        new PDFDocument({
-          size: "A4",
-          margin: 40,
+// ------------------------------------------------------------
+// 6.1 Supply thermal (VITROS 4600)
+// ------------------------------------------------------------
 
-          info: {
-            Title:
-              "Raport serwisowy e-Connectivity v12",
+function analyzeSupplyThermal(result, charts) {
+  const A = newAnalysis(result, "supplyThermal");
+  A.problem = `Aktywny alert: ${result.alertName}.`;
+  checkCompleteness(result, A, ["duty", "ambient", "thermistors", "thermDiff"], charts);
 
-            Author:
-              "Service Triage Agent v12"
-          }
+  const H = rangeHours(result.dateRange);
+  const duty = pickChart(charts, "duty");
+  const amb = pickChart(charts, "ambient");
+  const th = pickChart(charts, "thermistors");
+  const diff = pickChart(charts, "thermDiff");
+
+  let satShare = 0, satHours = null, tempRise = null, aboveShare = null, ambientOut = false, dutyThr = null;
+
+  if (duty && mainSeries(duty)) {
+    const s = mainSeries(duty), res = duty.local.axis.resolution, tag = uncertainTag(duty);
+    const vals = s.samples.map(x => x[1]);
+    const thr = duty.local.thresholds.map(t => t.value).filter(v => v < 99).sort((a, b) => b - a)[0];
+    dutyThr = Number.isFinite(thr) ? thr : null;
+
+    A.readings.push({ param: "Duty Cycle — średnia", value: `${fmtN(s.avg)}%`, ref: `±${fmtN(res, 2)} pp`, assessment: "odczyt" + tag });
+
+    if (dutyThr !== null) {
+      aboveShare = vals.filter(v => v > dutyThr + res).length / vals.length;
+      A.readings.push({
+        param: "Duty Cycle powyżej poziomu pożądanego",
+        value: fmtPct(aboveShare),
+        ref: `${fmtN(dutyThr)}% (próg z wykresu)`,
+        assessment: aboveShare >= 0.1 ? "odchylenie" : "w normie"
+      });
+      A.observations.push({ status: "Odczyt", text: `Duty powyżej ${fmtN(dutyThr)}% przez ${fmtPct(aboveShare)} czasu, średnio ${fmtN(s.avg)}% (±${fmtN(res, 2)} pp)${tag}.` });
+    } else {
+      A.observations.push({ status: "Odczyt", text: `Duty średnio ${fmtN(s.avg)}%${tag}. Brak pewnego odczytu poziomu pożądanego z wykresu.` });
+    }
+
+    A.observations.push({ status: "Odczyt", text: `Trend duty: ${s.trend > 0 ? "+" : ""}${fmtN(s.trend)} pp (ostatnia ćwiartka vs pierwsza).` });
+
+    const sat = episodes(s.samples, v => v >= 99);
+    satShare = sat.reduce((n, e) => n + e.n, 0) / vals.length;
+    satHours = H ? satShare * H * (1 - (s.gapShare || 0)) : null;
+    const longest = sat.reduce((b, e) => (e.to - e.from > b.to - b.from ? e : b), { from: 0, to: 0 });
+    A.readings.push({
+      param: "Nasycenie duty (≥ 99%)",
+      value: sat.length ? `${fmtPct(satShare)} czasu${satHours !== null ? `, ok. ${fmtHours(satHours)}` : ""}` : "brak",
+      ref: plural(sat.length, "epizod", "epizody", "epizodów"),
+      assessment: sat.length ? "praca na granicy" : "w normie"
+    });
+    if (sat.length) {
+      A.observations.push({
+        status: "Odczyt",
+        text: `Duty sięga ≥ 99% w ${sat.length} ${sat.length === 1 ? "epizodzie" : "epizodach"}, łącznie ${fmtPct(satShare)} czasu` +
+          `${satHours !== null ? ` (ok. ${fmtHours(satHours)})` : ""}; najdłuższy epizod` +
+          `${H ? ` ok. ${fmtHours((longest.to - longest.from) * H)}` : ""}${approxTimeText(result.dateRange, longest.from)}.`
+      });
+    } else {
+      A.observations.push({ status: "Odczyt", text: "W tych danych nie widać nasycenia duty (≥ 99%)." });
+    }
+
+    // 3. Temperatura Supply 3 w nasyceniu vs poza nim.
+    if (th && th.local.series.length && sat.length) {
+      const inSat = f => sat.some(e => f >= e.from - 0.002 && f <= e.to + 0.002);
+      const s0 = th.local.series[0], others = th.local.series.slice(1);
+      const inside = [], outside = [];
+      for (const [f, v] of s0.samples) {
+        const vs = [v, ...others.map(o => sampleAt(o, f)).filter(x => x !== null)];
+        (inSat(f) ? inside : outside).push(mean(vs));
+      }
+      if (inside.length >= 3 && outside.length >= 3) {
+        const resT = th.local.axis.resolution;
+        tempRise = mean(inside) - mean(outside);
+        A.readings.push({
+          param: "Supply 3: średnia w nasyceniu vs poza",
+          value: `${fmtN(mean(inside), 2)} vs ${fmtN(mean(outside), 2)} °C`,
+          ref: `szczyt ${fmtN(Math.max(...inside), 2)} vs ${fmtN(Math.max(...outside), 2)} °C, ±${fmtN(resT, 2)}`,
+          assessment: tempRise > 2 * resT ? "temperatura rośnie w nasyceniu" : "bez wyraźnej różnicy"
         });
-
-      const stream =
-        fs.createWriteStream(
-          PDF_FILE
-        );
-
-      stream.on(
-        "finish",
-        resolve
-      );
-
-      stream.on(
-        "error",
-        reject
-      );
-
-      doc.pipe(
-        stream
-      );
-
-      let REGULAR =
-        "Helvetica";
-
-      let BOLD =
-        "Helvetica-Bold";
-
-      const fontCandidates = [
-        [ARIAL, ARIAL_BOLD],
-        ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf"],
-        ["C:\\Windows\\Fonts\\calibri.ttf", "C:\\Windows\\Fonts\\calibrib.ttf"],
-        ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"],
-        ["/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"],
-        ["/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"]
-      ];
-
-      const fontPair = fontCandidates.find(
-        ([regular, bold]) => fs.existsSync(regular) && fs.existsSync(bold)
-      );
-
-      if (fontPair) {
-        doc.registerFont("ArialPL", fontPair[0]);
-        doc.registerFont("ArialPLBold", fontPair[1]);
-        REGULAR = "ArialPL";
-        BOLD = "ArialPLBold";
-      } else {
-        console.log(
-          "UWAGA: nie znaleziono czcionki z polskimi znakami (Arial/Segoe/DejaVu) — PDF będzie bez polskich liter."
-        );
+        A.observations.push({
+          status: "Odczyt",
+          text: `W okresach nasycenia temperatura Supply 3 jest średnio ${tempRise >= 0 ? "wyższa" : "niższa"} o ${fmtN(Math.abs(tempRise), 2)} °C niż poza nimi${uncertainTag(th)}.`
+        });
+        if (tempRise <= 2 * resT) tempRise = null;
       }
+    }
+  }
 
-      function pageCheck(
-        needed = 130
-      ) {
-        if (
-          doc.y >
-          doc.page.height -
-          needed
-        ) {
-          doc.addPage();
+  // 4. Otoczenie vs pasmo.
+  if (amb && mainSeries(amb)) {
+    const s = mainSeries(amb), res = amb.local.axis.resolution;
+    const thr = amb.local.thresholds.map(t => t.value).sort((a, b) => a - b);
+    if (thr.length >= 2) {
+      const lo = thr[0], hi = thr[thr.length - 1];
+      const out = s.samples.filter(([, v]) => v > hi + res || v < lo - res).length / s.samples.length;
+      const lastOut = s.last > hi + res || s.last < lo - res;
+      ambientOut = out > 0;
+      A.readings.push({
+        param: "Otoczenie poza pasmem",
+        value: fmtPct(out),
+        ref: `${fmtN(lo)}–${fmtN(hi)} °C (z wykresu)`,
+        assessment: lastOut ? "przekroczenie na końcu okna" : out ? "przekroczenia" : "w paśmie"
+      });
+      A.observations.push({
+        status: "Odczyt",
+        text: out
+          ? `Otoczenie poza pasmem ${fmtN(lo)}–${fmtN(hi)} °C przez ${fmtPct(out)} czasu (maks ${fmtN(s.max)} °C${approxTimeText(result.dateRange, s.maxAt)})${lastOut ? "; przekroczenie trwa na końcu okna" : ""}.`
+          : `Otoczenie w paśmie ${fmtN(lo)}–${fmtN(hi)} °C (min ${fmtN(s.min)}, maks ${fmtN(s.max)} °C).`
+      });
+    } else {
+      A.observations.push({ status: "Odczyt", text: `Otoczenie: min ${fmtN(s.min)}, maks ${fmtN(s.max)} °C. Brak pewnego odczytu pasma z wykresu.` });
+    }
+    A.observations.push({ status: "Odczyt", text: `Trend otoczenia: ${s.trend > 0 ? "+" : ""}${fmtN(s.trend)} °C (ostatnia ćwiartka vs pierwsza).` });
+  }
+
+  // 5. Różnica termistorów vs trigger.
+  let diffMarginLow = false;
+  if (diff && mainSeries(diff)) {
+    const s = mainSeries(diff);
+    const trigger = Math.max(...diff.local.thresholds.map(t => Math.abs(t.value)));
+    const maxAbs = Math.max(Math.abs(s.min), Math.abs(s.max));
+    if (Number.isFinite(trigger) && trigger > 0) {
+      const margin = trigger - maxAbs;
+      diffMarginLow = margin < 0.25 * trigger;
+      A.readings.push({
+        param: "Różnica termistorów — maks.",
+        value: fmtN(maxAbs, 2),
+        ref: `trigger ${fmtN(trigger, 2)} (z wykresu)`,
+        assessment: `zapas ≈ ${fmtN(margin, 2)}`
+      });
+      A.observations.push({ status: "Odczyt", text: `Różnica termistorów nie przekracza ${fmtN(maxAbs, 2)} przy triggerze ${fmtN(trigger, 2)} (zapas ≈ ${fmtN(margin, 2)})${uncertainTag(diff)}.` });
+    } else {
+      A.observations.push({ status: "Odczyt", text: `Różnica termistorów maks. ${fmtN(maxAbs, 2)}. Brak pewnego odczytu triggera z wykresu.` });
+    }
+  }
+
+  // 6. Korelacja duty–otoczenie i dopasowanie do porównania (7).
+  if (duty && amb && mainSeries(duty) && mainSeries(amb)) {
+    const pairs = mainSeries(duty).samples
+      .map(([f, d]) => [sampleAt(mainSeries(amb), f), d])
+      .filter(p => p[0] !== null);
+    const r = correlation(pairs);
+    if (r !== null) {
+      A.observations.push({ status: "Odczyt", text: `Korelacja duty–otoczenie r = ${fmtN(r, 2)} (${pairs.length} par). Korelacja nie dowodzi przyczyny.` });
+    }
+    const fit = linearFit(pairs.filter(p => p[1] < 99)); // nasycenie spłaszcza zależność
+    if (fit && fit.xMax - fit.xMin >= 1) A.dutyFit = fit;
+  }
+
+  // Priorytet (rozdz. 7).
+  if (!duty || !mainSeries(duty)) {
+    A.priority = "ZDALNIE";
+    A.priorityReason = "Brak pewnego odczytu Duty Cycle — nie da się ocenić wydajności układu; najpierw uzupełnić dane AAA.";
+  } else if (satShare >= 0.05 && tempRise !== null) {
+    A.priority = "WYSOKI";
+    A.priorityReason = `Duty ≥ 99% przez ${fmtPct(satShare)} czasu${satHours !== null ? ` (ok. ${fmtHours(satHours)})` : ""}, a temperatura Supply 3 rośnie w tych okresach o ${fmtN(tempRise, 2)} °C.`;
+  } else if (satShare > 0 || (aboveShare !== null && aboveShare >= 0.1) || ambientOut) {
+    A.priority = "ŚREDNI";
+    A.priorityReason = satShare > 0
+      ? `Duty ≥ 99% przez ${fmtPct(satShare)} czasu, bez wyraźnego wzrostu temperatury Supply 3 w tych okresach.`
+      : aboveShare !== null && aboveShare >= 0.1
+        ? `Duty powyżej ${fmtN(dutyThr)}% przez ${fmtPct(aboveShare)} czasu, układ kompensuje (brak nasycenia).`
+        : "Otoczenie poza pasmem — przyczyna może być zewnętrzna.";
+  } else {
+    A.priority = "NISKI";
+    A.priorityReason = `Duty bez nasycenia${aboveShare !== null ? `, powyżej progu ${fmtPct(aboveShare)} czasu` : ""}; otoczenie w paśmie lub bez pewnego odczytu.`;
+  }
+
+  // Hipotezy.
+  if (satShare > 0 || (aboveShare !== null && aboveShare >= 0.1)) {
+    A.hypotheses.push("Hipoteza: obniżona wydajność chłodzenia (np. zabrudzony radiator lub filtr, wentylatory, ograniczony przepływ powietrza, spadek sprawności elementu chłodzącego, nieszczelność pokrywy). Do weryfikacji na miejscu.");
+  }
+  if (ambientOut) {
+    A.hypotheses.push("Hipoteza: podwyższone obciążenie może wynikać z temperatury otoczenia. Do weryfikacji z laboratorium (klimatyzacja, wentylacja).");
+  }
+  if (diffMarginLow) {
+    A.hypotheses.push("Hipoteza: rozbieżność termistorów zbliża się do triggera — może wskazywać na problem czujnika lub jego połączenia. Do weryfikacji pomiarem.");
+  }
+  if (!A.hypotheses.length) {
+    A.hypotheses.push("W tych danych nie widać wzorca, który uzasadniałby hipotezę usterki. Alert może wynikać z krótkiego epizodu.");
+  }
+
+  // Zalecenia.
+  const crit = dutyThr !== null
+    ? `duty < ${fmtN(dutyThr)}% przy ≈ 27 °C, brak epizodów 100%`
+    : "brak epizodów duty 100%";
+  if (ambientOut) {
+    A.actions.push({ text: "Zadzwonić do laboratorium: sprawdzić temperaturę i wentylację pomieszczenia.", criterion: "otoczenie w paśmie z wykresu AAA", mode: "zdalnie" });
+  }
+  if (A.priority === "WYSOKI" || A.priority === "ŚREDNI") {
+    A.actions.push({ text: "Wykonać Checking Temperatures and Thermal Currents.", criterion: crit, mode: "na miejscu" });
+    A.actions.push({ text: "Sprawdzić radiator, filtr, wentylatory, przepływ powietrza i szczelność pokrywy.", criterion: crit, mode: "na miejscu" });
+  } else {
+    A.actions.push({ text: "Obserwować Duty Cycle w kolejnym oknie AAA.", criterion: crit, mode: "zdalnie" });
+  }
+  addDocsActions(result, A);
+  return A;
+}
+
+// ------------------------------------------------------------
+// 6.2 Slide (CM) Ring (XT 3400)
+// ------------------------------------------------------------
+
+function markerVsBand(chart) {
+  const m = chart.local.marker;
+  const ys = chart.local.thresholds.filter(t => t.color === "żółta").map(t => t.value).sort((a, b) => a - b);
+  if (!m) return null;
+  if (ys.length < 2) return { value: m.value, band: null, outsideBy: null };
+  const lo = ys[0], hi = ys[ys.length - 1];
+  const outsideBy = m.value > hi ? m.value - hi : m.value < lo ? m.value - lo : 0;
+  return { value: m.value, band: [lo, hi], outsideBy };
+}
+
+function analyzeCmRing(result, charts) {
+  const A = newAnalysis(result, "cmRing");
+  A.problem = `Aktywny alert: ${result.alertName}.`;
+  checkCompleteness(result, A, ["slotCorr", "stepLoss", "cmStopping", "readSync"], charts);
+
+  const slot = pickChart(charts, "slotCorr");
+  const step = pickChart(charts, "stepLoss");
+  const H = rangeHours(result.dateRange);
+
+  let slotAbove = null, slotThr = null, shift = null, stepMargin = null, stepLimit = null, outsideMarkers = [];
+
+  if (slot && mainSeries(slot)) {
+    const s = mainSeries(slot), res = slot.local.axis.resolution, tag = uncertainTag(slot);
+    const thr = slot.local.thresholds.map(t => t.value).sort((a, b) => a - b)[0];
+    slotThr = Number.isFinite(thr) ? thr : null;
+    if (slotThr !== null) {
+      slotAbove = s.samples.filter(([, v]) => v > slotThr + res).length / s.samples.length;
+      A.readings.push({
+        param: "Slot Corrections powyżej poziomu pożądanego",
+        value: fmtPct(slotAbove),
+        ref: `${fmtN(slotThr)}/h (próg z wykresu)`,
+        assessment: slotAbove >= 0.1 ? "odchylenie" : "w normie"
+      });
+    }
+    A.readings.push({ param: "Slot Corrections — średnia / maks.", value: `${fmtN(s.avg)} / ${fmtN(s.max)}`, ref: `±${fmtN(res, 2)}`, assessment: "odczyt" + tag });
+    A.observations.push({
+      status: "Odczyt",
+      text: `Slot Corrections: średnio ${fmtN(s.avg)}, maks ${fmtN(s.max)}${approxTimeText(result.dateRange, s.maxAt)}` +
+        `${slotThr !== null ? `; powyżej ${fmtN(slotThr)} przez ${fmtPct(slotAbove)} czasu` : "; brak pewnego odczytu poziomu pożądanego"}${tag}.`
+    });
+
+    const ls = levelShift(s.samples);
+    if (ls && Math.abs(ls.after - ls.before) >= Math.max(3 * res, 0.2 * Math.abs(ls.before))) {
+      shift = ls;
+      const nearGap = (s.gaps || []).find(g => ls.at >= g.from - 0.03 && ls.at <= g.to + 0.03);
+      A.readings.push({
+        param: "Skok poziomu Slot Corrections",
+        value: `${fmtN(ls.before)} → ${fmtN(ls.after)}`,
+        ref: approxTimeText(result.dateRange, ls.at).trim() || `ok. ${fmtPct(ls.at)} osi`,
+        assessment: nearGap ? "pokrywa się z luką w danych" : "bez luki"
+      });
+      A.observations.push({
+        status: "Odczyt",
+        text: `Poziom Slot Corrections zmienia się z ${fmtN(ls.before)} na ${fmtN(ls.after)}${approxTimeText(result.dateRange, ls.at)}.` +
+          (nearGap ? ` Skok pokrywa się z luką w danych${gapDurationText(result.dateRange, nearGap)} — sugeruje zdarzenie (restart, interwencja), a nie stopniowe zużycie.` : "")
+      });
+    }
+  }
+
+  if (step && mainSeries(step)) {
+    const s = mainSeries(step);
+    const limit = step.local.thresholds.map(t => t.value).sort((a, b) => a - b)[0];
+    if (Number.isFinite(limit)) {
+      stepLimit = limit;
+      // Zapas liczony od najbardziej ujemnej wartości (CLAUDE.md 6.2.3).
+      stepMargin = s.min - limit;
+      A.readings.push({
+        param: "Step Loss — najgorszy odczyt",
+        value: fmtN(s.min),
+        ref: `limit ${fmtN(limit)} (z wykresu)`,
+        assessment: stepMargin <= 0 ? "limit osiągnięty" : `zapas ${fmtN(stepMargin)}`
+      });
+      A.observations.push({ status: "Odczyt", text: `Step Loss: najgorszy odczyt ${fmtN(s.min)}${approxTimeText(result.dateRange, s.minAt)}, limit ${fmtN(limit)}, zapas ${fmtN(stepMargin)}${uncertainTag(step)}.` });
+    } else {
+      A.observations.push({ status: "Odczyt", text: `Step Loss: najgorszy odczyt ${fmtN(s.min)}. Brak pewnego odczytu limitu z wykresu.` });
+    }
+  }
+
+  for (const kind of ["cmStopping", "readSync"]) {
+    const c = pickChart(charts, kind);
+    if (!c) continue;
+    const mv = markerVsBand(c);
+    const label = CHART_KIND_LABEL[kind];
+    if (!mv) {
+      A.observations.push({ status: "Odczyt", text: `${label}: brak pewnego odczytu znacznika tego aparatu.` });
+      continue;
+    }
+    const inBand = mv.band && mv.outsideBy === 0;
+    A.readings.push({
+      param: `${label} — wartość tego aparatu`,
+      value: fmtN(mv.value),
+      ref: mv.band ? `pasmo ${fmtN(mv.band[0])}–${fmtN(mv.band[1])}` : "brak pewnego odczytu pasma",
+      assessment: !mv.band ? "?" : inBand ? "w paśmie" : `odstająca o ${fmtN(Math.abs(mv.outsideBy))}`
+    });
+    if (mv.band && !inBand) outsideMarkers.push(label);
+    A.observations.push({
+      status: "Odczyt",
+      text: `${label}: wartość tego aparatu ${fmtN(mv.value)}` +
+        (mv.band ? (inBand ? ` w paśmie ${fmtN(mv.band[0])}–${fmtN(mv.band[1])}.` : `, poza pasmem ${fmtN(mv.band[0])}–${fmtN(mv.band[1])} o ${fmtN(Math.abs(mv.outsideBy))}.`) : ".") +
+        " Populacja z pikseli orientacyjna."
+    });
+  }
+
+  if (!slot && !step) {
+    A.priority = "ZDALNIE";
+    A.priorityReason = "Brak pewnego odczytu Slot Corrections i Step Loss — najpierw uzupełnić dane AAA.";
+  } else if (stepMargin !== null && stepMargin <= 0) {
+    A.priority = "WYSOKI";
+    A.priorityReason = `Step Loss osiąga limit ${fmtN(stepLimit)} (najgorszy odczyt ${fmtN(stepLimit + stepMargin)}).`;
+  } else if (slotAbove !== null && slotAbove >= 0.5 && outsideMarkers.length) {
+    A.priority = "WYSOKI";
+    A.priorityReason = `Slot Corrections powyżej ${fmtN(slotThr)} przez ${fmtPct(slotAbove)} czasu, a ${outsideMarkers.join(" i ")} poza pasmem.`;
+  } else if ((slotAbove !== null && slotAbove >= 0.1) || outsideMarkers.length || (shift && slotThr !== null && shift.after > slotThr)) {
+    A.priority = "ŚREDNI";
+    A.priorityReason = slotAbove !== null && slotAbove >= 0.1
+      ? `Slot Corrections powyżej ${fmtN(slotThr)} przez ${fmtPct(slotAbove)} czasu${stepMargin !== null ? `, Step Loss z zapasem ${fmtN(stepMargin)}` : ""}.`
+      : outsideMarkers.length
+        ? `${outsideMarkers.join(" i ")} poza pasmem populacji.`
+        : `Skok poziomu Slot Corrections do ${fmtN(shift.after)} (powyżej ${fmtN(slotThr)}).`;
+  } else {
+    A.priority = "NISKI";
+    A.priorityReason = `Slot Corrections${slotAbove !== null ? ` powyżej progu ${fmtPct(slotAbove)} czasu` : " bez pewnego progu"}${stepMargin !== null ? `, Step Loss z zapasem ${fmtN(stepMargin)}` : ""}.`;
+  }
+
+  if (slotAbove !== null && slotAbove >= 0.1 && (stepMargin === null || stepMargin > 0)) {
+    A.hypotheses.push("Hipoteza: aparat osiąga pozycję, ale potrzebuje więcej korekcji — może wskazywać na zwiększony opór lub zużycie mechaniki (CM Rotor belt i tracking, CM/RT Drive Motor i pinion, SAG rollers/bearings/spacers, Z-axis bearing pads). Do weryfikacji na miejscu.");
+  }
+  if (shift && (mainSeries(slot).gaps || []).some(g => shift.at >= g.from - 0.03 && shift.at <= g.to + 0.03)) {
+    A.hypotheses.push("Hipoteza: zmiana poziomu po luce w danych może wynikać z restartu lub interwencji. Do weryfikacji w historii serwisowej.");
+  }
+  if (outsideMarkers.length) {
+    A.hypotheses.push(`Hipoteza: wartość adjustment (${outsideMarkers.join(", ")}) odstająca od populacji może mieć związek z korekcjami. Do weryfikacji po ocenie mechaniki.`);
+  }
+  if (stepMargin !== null && stepMargin <= 0) {
+    A.hypotheses.push("Hipoteza: gubienie kroków przez napęd CM Ring. Do weryfikacji na miejscu.");
+  }
+  if (!A.hypotheses.length) {
+    A.hypotheses.push("W tych danych nie widać wzorca, który uzasadniałby hipotezę usterki.");
+  }
+
+  const crit = slotThr !== null ? `Slot Corrections < ${fmtN(slotThr)}/h, brak skoku poziomu` : "brak wzrostu Slot Corrections";
+  if (A.priority === "WYSOKI" || A.priority === "ŚREDNI") {
+    A.actions.push({ text: "Sprawdzić CM Rotor belt (zużycie, tracking na pinion CM/RT Drive Motor).", criterion: crit, mode: "na miejscu" });
+    A.actions.push({ text: "Sprawdzić SAG rollers, bearings, spacers i Z-axis bearing pads.", criterion: crit, mode: "na miejscu" });
+    if (outsideMarkers.length) {
+      A.actions.push({ text: `Zweryfikować ${outsideMarkers.join(" i ")} dopiero po ocenie mechaniki, zgodnie z procedurą serwisową.`, criterion: "wartość w paśmie żółtych progów", mode: "na miejscu" });
+    }
+  } else {
+    A.actions.push({ text: "Obserwować Slot Corrections i Step Loss w kolejnym oknie AAA.", criterion: crit, mode: "zdalnie" });
+  }
+  if (shift) {
+    A.actions.push({ text: "Sprawdzić historię serwisową i restarty w okolicy skoku poziomu.", criterion: "wyjaśniona przyczyna zmiany poziomu", mode: "zdalnie" });
+  }
+  addDocsActions(result, A);
+  return A;
+}
+
+// ------------------------------------------------------------
+// 6.3 Data Logger Status
+// ------------------------------------------------------------
+
+function analyzeDataLogger(result, now = new Date()) {
+  const A = newAnalysis(result, "dataLogger");
+  A.problem = "e-Connectivity zgłasza brak lub opóźnienie danych z analizatora.";
+  A.priority = "ZDALNIE";
+
+  const dl = result.dataLogger || {};
+  const last = parseUsDateTime(dl.lastConnected);
+  if (last) {
+    const h = Math.max(0, (now - last) / 3.6e6);
+    A.elapsedHours = h;
+    const d = Math.floor(h / 24), hh = Math.round(h - d * 24);
+    A.elapsedText = `≈ ${d} d ${hh} h`;
+    A.observations.push({ status: "Fakt", text: `Ostatnie połączenie: ${fmtPlDateTime(last)} (${A.elapsedText} przed raportem).` });
+    A.priorityReason = `Brak łączności od ${fmtPlDateTime(last)} (${A.elapsedText}); aparat jest niewidoczny dla alertów technicznych.`;
+  } else {
+    A.missing.push("Last Connected (brak pewnego odczytu)");
+    A.priorityReason = "Brak pewnego odczytu ostatniego połączenia; aparat może być niewidoczny dla alertów technicznych.";
+  }
+
+  for (const [label, list] of [["A-file", dl.aFile || []], ["B-file", dl.bFile || []]]) {
+    if (!list.length) { A.missing.push(`${label} upload status`); continue; }
+    const allZero = list.every(x => /^0\/0$/.test(x.value));
+    A.observations.push({
+      status: "Fakt",
+      text: `${label}: ${list.map(x => `${x.day} ${x.value}`).join(", ")}${allZero ? " — 0/0 przez cały okres, brak transmisji" : ""}.`
+    });
+  }
+
+  A.observations.push({ status: "Fakt", text: "Sam alert łączności nie dowodzi awarii mechanicznej, ale oznacza brak widoczności alertów technicznych tego aparatu." });
+  A.hypotheses.push("Hipoteza: przerwa w zasilaniu, sieci, usłudze Data Logger lub regułach zapory. Do weryfikacji zdalnie.");
+
+  A.actions.push({ text: "Zadzwonić do laboratorium: czy aparat jest włączony i podłączony do sieci.", criterion: "aparat pracuje, kabel sieciowy podłączony", mode: "zdalnie" });
+  A.actions.push({ text: "Sprawdzić status usługi e-Connectivity/Data Logger.", criterion: "Last Connected aktualizuje się", mode: "zdalnie" });
+  A.actions.push({ text: "Sprawdzić z IT klienta zaporę i sieć.", criterion: "A-file i B-file > 0 w kolejnym dniu", mode: "zdalnie" });
+  A.actions.push({ text: "Zaplanować wizytę dopiero po wykluczeniu przyczyn zdalnych.", criterion: "", mode: "na miejscu" });
+  return A;
+}
+
+// ------------------------------------------------------------
+// 6.4 Inne alerty
+// ------------------------------------------------------------
+
+function analyzeGeneric(result, charts) {
+  const A = newAnalysis(result, "generic");
+  A.problem = `Aktywny alert: ${result.alertName}. Brak dedykowanych reguł dla tego typu alertu.`;
+  checkCompleteness(result, A, [], charts);
+
+  const ev = result.genericEvidence || {};
+  A.observations.push({ status: "Fakt", text: `AAA: ${ev.rules ? ev.rules.length : 0} linii z regułami/parametrami; condition codes: ${ev.conditionCodes && ev.conditionCodes.length ? ev.conditionCodes.join(", ") : "brak pewnego odczytu"}.` });
+
+  let exceed = 0;
+  for (const c of charts) {
+    for (const line of describeLocalChart(c.local, result.dateRange).findings) {
+      A.observations.push({ status: "Odczyt", text: line + uncertainTag(c) });
+    }
+    for (const s of c.local.series) if (s.versus.some(v => v.above >= 0.02 && v.above <= 0.98)) exceed++;
+  }
+
+  if (!charts.length) {
+    A.priority = "ZDALNIE";
+    A.priorityReason = "Brak pewnego odczytu wykresów — brak danych do oceny technicznej.";
+  } else if (exceed) {
+    A.priority = "ŚREDNI";
+    A.priorityReason = `${exceed} seria(e) przekracza(ją) linie progowe na wykresach; brak reguł dla tego alertu.`;
+  } else {
+    A.priority = "NISKI";
+    A.priorityReason = "Serie na wykresach nie przekraczają linii progowych w tych danych.";
+  }
+
+  A.hypotheses.push("Brak dedykowanych reguł — nie stawiamy hipotezy przyczyny bez dokumentacji.");
+  A.actions.push({ text: "Porównać wykresy AAA z progami opisanymi w AAA.", criterion: "", mode: "zdalnie" });
+  A.actions.push({ text: "Sprawdzić powiązane condition codes.", criterion: "", mode: "zdalnie" });
+  addDocsActions(result, A);
+  return A;
+}
+
+function analyzeAlert(result, now = new Date()) {
+  const family = alertFamily(result.alertName);
+
+  if (result.error) {
+    const A = newAnalysis(result, family);
+    A.priority = "ZDALNIE";
+    A.problem = `Aktywny alert: ${result.alertName || "nieznany"}.`;
+    A.priorityReason = `Brak oceny technicznej — AAA nie zostało odczytane (${result.error}).`;
+    A.missing.push("dane AAA");
+    A.observations.push({ status: "Fakt", text: `Błąd analizy: ${result.error}` });
+    A.actions.push({ text: "Otworzyć AAA ręcznie i powtórzyć analizę tego aparatu.", criterion: "AAA otwiera się z właściwym J-number", mode: "zdalnie" });
+    return A;
+  }
+
+  const charts = validateCharts(result);
+  if (family === "dataLogger") return analyzeDataLogger(result, now);
+  if (family === "supplyThermal") return analyzeSupplyThermal(result, charts);
+  if (family === "cmRing") return analyzeCmRing(result, charts);
+  return analyzeGeneric(result, charts);
+}
+
+// Porównanie aparatów tego samego modelu (CLAUDE.md 4.5, 6.1.7, 6.3.5).
+function compareAnalyzers(results, refAmbient = 27) {
+  const notes = [];
+
+  const byModel = new Map();
+  for (const r of results) {
+    if (!r.analysis) continue;
+    if (!byModel.has(r.model)) byModel.set(r.model, []);
+    byModel.get(r.model).push(r);
+  }
+
+  for (const [model, group] of byModel) {
+    // Duty przy tej samej temperaturze otoczenia.
+    const fits = group
+      .filter(r => r.analysis.dutyFit)
+      .map(r => {
+        const f = r.analysis.dutyFit;
+        const inRange = refAmbient >= f.xMin - 1 && refAmbient <= f.xMax + 1;
+        const extrapolated = refAmbient < f.xMin || refAmbient > f.xMax;
+        return { r, at: inRange ? Math.max(0, Math.min(100, f.a + f.b * refAmbient)) : null, extrapolated };
+      });
+
+    const withValue = fits.filter(x => x.at !== null);
+    if (withValue.length >= 2) {
+      const best = withValue.reduce((a, b) => (b.at < a.at ? b : a));
+      for (const x of withValue) {
+        const delta = x.at - best.at;
+        notes.push({ model, jno: x.r.jno, kind: "duty", value: x.at, delta, ref: best.r.jno, extrapolated: x.extrapolated });
+        if (x !== best && delta >= 10) {
+          x.r.analysis.observations.push({
+            status: "Odczyt",
+            text: `Przy ≈ ${refAmbient} °C duty ≈ ${fmtN(x.at)}% vs ${fmtN(best.at)}% na J${best.r.jno} (różnica ${fmtN(delta)} pp, dopasowanie liniowe${x.extrapolated || best.extrapolated ? ", częściowo ekstrapolacja poza zakres danych" : ""}). Wskazówka na obniżoną sprawność; samo porównanie nie dowodzi usterki.`
+          });
         }
       }
+    }
 
-      function heading(
-        value,
-        size = 15
-      ) {
-        doc
-          .font(BOLD)
-          .fontSize(size)
-          .fillColor("#111111")
-          .text(value);
-
-        doc.moveDown(0.4);
+    // Wersja oprogramowania inna niż u pozostałych aparatów tego modelu (obserwacja, nie przyczyna).
+    const versions = group.map(r => (r.asset && r.asset.softwareVersion) || "").filter(Boolean);
+    if (new Set(versions).size > 1) {
+      const counts = new Map();
+      versions.forEach(v => counts.set(v, (counts.get(v) || 0) + 1));
+      const common = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      for (const r of group) {
+        const v = r.asset && r.asset.softwareVersion;
+        if (v && v !== common) {
+          r.analysis.observations.push({ status: "Fakt", text: `Wersja oprogramowania ${v} różni się od najczęstszej u aparatów ${model} (${common}). Obserwacja, nie przyczyna.` });
+        }
       }
+    }
+  }
 
-      function field(
-        label,
-        value
-      ) {
-        doc
-          .font(BOLD)
-          .fontSize(9.5)
-          .fillColor("#222222")
-          .text(
-            `${label}: `,
-            {
-              continued: true
-            }
-          );
+  return notes;
+}
 
-        doc
-          .font(REGULAR)
-          .text(
-            value ||
-            "brak danych"
-          );
-      }
+function sortByPriority(results) {
+  return [...results].sort((a, b) =>
+    PRIORITY_ORDER.indexOf(a.analysis.priority) - PRIORITY_ORDER.indexOf(b.analysis.priority)
+  );
+}
 
-      function section(
-        title,
-        body
-      ) {
-        pageCheck(110);
+// ============================================================
+// PDF (CLAUDE.md, rozdz. 8)
+// ============================================================
 
-        doc.moveDown(0.6);
+const SERIES_PDF_COLORS = { niebieska: "#0000ff", "brązowa": "#8b4513", czerwona: "#d00000" };
+const COMPARE_COLORS = ["#1f5fbf", "#c0392b", "#2e8b57", "#8e44ad", "#d68910"];
 
-        doc
-          .font(BOLD)
-          .fontSize(10.5)
-          .fillColor("#111111")
-          .text(title);
+function generatePDF(results, analyzerCount, comparisonNotes = []) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 40,
+      info: { Title: "Raport serwisowy e-Connectivity v3", Author: "Service Triage Agent v3" }
+    });
 
-        doc.moveDown(0.15);
+    const stream = fs.createWriteStream(PDF_FILE);
+    stream.on("finish", resolve);
+    stream.on("error", reject);
+    doc.pipe(stream);
 
-        doc
-          .font(REGULAR)
-          .fontSize(9.5)
-          .fillColor("#333333")
-          .text(
-            body ||
-            "Brak danych.",
-            {
-              lineGap: 2
-            }
-          );
-      }
+    let REGULAR = "Helvetica";
+    let BOLD = "Helvetica-Bold";
 
-      function actions(list) {
-        pageCheck(170);
+    const fontCandidates = [
+      [ARIAL, ARIAL_BOLD],
+      ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf"],
+      ["C:\\Windows\\Fonts\\calibri.ttf", "C:\\Windows\\Fonts\\calibrib.ttf"],
+      ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"],
+      ["/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"],
+      ["/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"]
+    ];
 
-        doc.moveDown(0.7);
+    const fontPair = fontCandidates.find(([regular, bold]) => fs.existsSync(regular) && fs.existsSync(bold));
 
-        doc
-          .font(BOLD)
-          .fontSize(10.5)
-          .fillColor("#111111")
-          .text(
-            "CO POWINIEN ZROBIĆ FSE"
-          );
+    if (fontPair) {
+      doc.registerFont("ArialPL", fontPair[0]);
+      doc.registerFont("ArialPLBold", fontPair[1]);
+      REGULAR = "ArialPL";
+      BOLD = "ArialPLBold";
+    } else {
+      console.log("UWAGA: nie znaleziono czcionki z polskimi znakami (Arial/Segoe/DejaVu) — PDF będzie bez polskich liter.");
+    }
 
-        doc.moveDown(0.3);
+    const left = doc.page.margins.left;
+    const contentWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+    const bottomLimit = () => doc.page.height - doc.page.margins.bottom;
 
-        list.forEach(
-          (value, index) => {
-            pageCheck(50);
+    function pageCheck(needed = 130) {
+      if (doc.y > doc.page.height - needed) doc.addPage();
+    }
 
-            doc
-              .font(REGULAR)
-              .fontSize(9.5)
-              .fillColor("#333333")
-              .text(
-                `${index + 1}. ${value}`,
-                {
-                  indent: 8,
-                  lineGap: 2
-                }
-              );
+    function heading(value, size = 15) {
+      pageCheck(90);
+      doc.x = left;
+      doc.font(BOLD).fontSize(size).fillColor("#111111").text(value);
+      doc.moveDown(0.4);
+    }
 
-            doc.moveDown(0.15);
-          }
-        );
-      }
-
-      // ======================================================
-      // COVER
-      // ======================================================
-
-      doc
-        .font(BOLD)
-        .fontSize(23)
-        .fillColor("#111111")
-        .text(
-          "RAPORT SERWISOWY",
-          {
-            align: "center"
-          }
-        );
-
-      doc
-        .fontSize(17)
-        .text(
-          "QuidelOrtho e-Connectivity",
-          {
-            align: "center"
-          }
-        );
-
+    function subheading(value) {
+      pageCheck(80);
+      doc.x = left;
       doc.moveDown(0.5);
+      doc.font(BOLD).fontSize(10.5).fillColor("#111111").text(value);
+      doc.moveDown(0.2);
+    }
 
-      doc
-        .font(REGULAR)
-        .fontSize(9)
-        .fillColor("#555555")
-        .text(
-          `Wygenerowano: ${formatDate(new Date())}`,
-          {
-            align: "center"
-          }
-        );
+    function field(label, value) {
+      doc.x = left;
+      doc.font(BOLD).fontSize(9.5).fillColor("#222222").text(`${label}: `, { continued: true });
+      doc.font(REGULAR).text(value || "brak danych");
+    }
 
-      doc.moveDown(1.5);
+    function paragraph(text, size = 9.3, color = "#333333") {
+      pageCheck(50);
+      doc.x = left;
+      doc.font(REGULAR).fontSize(size).fillColor(color).text(text, { lineGap: 1.5 });
+    }
 
-      heading(
-        "PODSUMOWANIE",
-        15
-      );
+    // Zdanie ze statusem (CLAUDE.md 3): status słowem, nie kolorem.
+    function statusLine(status, text) {
+      pageCheck(45);
+      doc.x = left;
+      doc.font(BOLD).fontSize(9).fillColor("#222222").text(`${status}: `, { continued: true });
+      doc.font(REGULAR).fillColor("#333333").text(text, { lineGap: 1.5 });
+      doc.moveDown(0.1);
+    }
 
-      field(
-        "Sprawdzone analizatory",
-        String(
-          analyzerCount
-        )
-      );
+    function table(columns, rows, size = 8) {
+      const pad = 3;
+      const totalW = columns.reduce((s, c) => s + c.width, 0);
+      const scale = contentWidth / totalW;
+      const widths = columns.map(c => c.width * scale);
 
-      field(
-        "Aktywne alerty",
-        String(
-          results.length
-        )
-      );
+      const rowHeight = (cells, font) => {
+        doc.font(font).fontSize(size);
+        return Math.max(...cells.map((t, i) => doc.heightOfString(String(t ?? ""), { width: widths[i] - 2 * pad }))) + 2 * pad;
+      };
 
-      doc.moveDown(1);
-
-      for (
-        const item
-        of results
-      ) {
-        pageCheck(110);
-
-        doc
-          .font(BOLD)
-          .fontSize(11)
-          .fillColor("#111111")
-          .text(
-            `${item.model} — J${item.jno}`
-          );
-
-        doc
-          .font(REGULAR)
-          .fontSize(9.5)
-          .text(
-            item.location.customer
-          );
-
-        doc
-          .fontSize(9)
-          .fillColor("#555555")
-          .text(
-            `${item.location.city} | ${item.alertName}`
-          );
-
-        doc
-          .font(BOLD)
-          .fontSize(9.5)
-          .fillColor("#111111")
-          .text(
-            `DECYZJA: ${item.analysis.decision}`
-          );
-
-        doc.moveDown(0.7);
-      }
-
-      // ======================================================
-      // DETAILS
-      // ======================================================
-
-      for (
-        const item
-        of results
-      ) {
-        const a =
-          item.analysis;
-
-        doc.addPage();
-
-        doc
-          .font(BOLD)
-          .fontSize(20)
-          .fillColor("#111111")
-          .text(
-            item.model
-          );
-
-        doc
-          .font(BOLD)
-          .fontSize(15)
-          .text(
-            `J-number: ${item.jno}`
-          );
-
-        doc.moveDown(0.5);
-
-        heading(
-          "LOKALIZACJA",
-          11
-        );
-
-        field(
-          "Placówka",
-          item.location.customer
-        );
-
-        field(
-          "Adres",
-          item.location.address
-        );
-
-        field(
-          "Miasto",
-          item.location.city
-        );
-
-        if (
-          item.asset
-        ) {
-          field(
-            "Status w bazie",
-            item.asset.excelStatus
-          );
-
-          field(
-            "Software",
-            item.asset.softwareVersion
-          );
-
-          field(
-            "Product family",
-            item.asset.productFamily
-          );
-        }
-
-        doc.moveDown(0.7);
-
-        heading(
-          item.alertName,
-          14
-        );
-
-        doc
-          .font(BOLD)
-          .fontSize(13)
-          .text(
-            `DECYZJA: ${a.decision}`
-          );
-
-        doc.moveDown(0.5);
-
-        field(
-          "Status e-Connectivity",
-          item.status
-        );
-
-        field(
-          "Priorytet serwisowy",
-          a.priority
-        );
-
-        if (
-          item.dateRange.start
-        ) {
-          field(
-            "Zakres danych AAA",
-            `${item.dateRange.start} – ${item.dateRange.end}`
-          );
-        }
-
-        section(
-          "PROBLEM",
-          a.problem
-        );
-
-        section(
-          "OD KIEDY",
-          a.since
-        );
-
-        section(
-          "CO WIDAĆ W DANYCH",
-          a.evidence
-        );
-
-        section(
-          "INTERPRETACJA",
-          a.interpretation
-        );
-
-        section(
-          "NAJBARDZIEJ PRAWDOPODOBNY KIERUNEK",
-          a.cause
-        );
-
-        actions(
-          a.actions
-        );
-
-        section(
-          "DECYZJA / PILNOŚĆ",
-          a.conclusion
-        );
-
-        // ====================================================
-        // DATA LOGGER
-        // ====================================================
-
-        if (
-          item.dataLogger
-            ?.detected
-        ) {
-          pageCheck(150);
-
-          doc.moveDown(0.8);
-
-          heading(
-            "DANE e-CONNECTIVITY",
-            11
-          );
-
-          field(
-            "Ostatnie połączenie",
-            item.dataLogger
-              .lastConnected
-          );
-
-          if (
-            item.dataLogger
-              .aFile.length
-          ) {
-            field(
-              "A-file",
-              item.dataLogger
-                .aFile
-                .map(
-                  x =>
-                    `${x.day}: ${x.value}`
-                )
-                .join(" | ")
-            );
-          }
-
-          if (
-            item.dataLogger
-              .bFile.length
-          ) {
-            field(
-              "B-file",
-              item.dataLogger
-                .bFile
-                .map(
-                  x =>
-                    `${x.day}: ${x.value}`
-                )
-                .join(" | ")
-            );
-          }
-        }
-
-        // ====================================================
-        // CHARTS
-        // ====================================================
-
-        if (
-          item.chartFiles.length
-        ) {
+      const drawRow = (cells, font, fill) => {
+        const h = rowHeight(cells, font);
+        if (doc.y + h > bottomLimit()) {
           doc.addPage();
+          if (font !== BOLD) drawRow(columns.map(c => c.header), BOLD, "#e8e8e8");
+        }
+        const y = doc.y;
+        if (fill) doc.save().rect(left, y, contentWidth, h).fill(fill).restore();
+        let x = left;
+        cells.forEach((t, i) => {
+          doc.font(font).fontSize(size).fillColor("#222222")
+            .text(String(t ?? ""), x + pad, y + pad, { width: widths[i] - 2 * pad });
+          x += widths[i];
+        });
+        doc.save().moveTo(left, y + h).lineTo(left + contentWidth, y + h).lineWidth(0.4).strokeColor("#bbbbbb").stroke().restore();
+        doc.x = left;
+        doc.y = y + h;
+      };
 
-          heading(
-            "WYKRESY DIAGNOSTYCZNE AAA",
-            14
-          );
+      pageCheck(60);
+      drawRow(columns.map(c => c.header), BOLD, "#e8e8e8");
+      for (const r of rows) drawRow(r, REGULAR, null);
+      doc.x = left;
+      doc.moveDown(0.5);
+    }
 
-          doc
-            .font(REGULAR)
-            .fontSize(8.5)
-            .fillColor("#555555")
-            .text(
-              "Wykresy źródłowe wykorzystane podczas oceny alertu."
-            );
+    // Wykres odtworzony z próbek: luki szarym pasem, nie linią (CLAUDE.md 8).
+    function drawReconstructed({ title, series, yMin, yMax, step = null, thresholds = [], dateRange, height = 125 }) {
+      if (!series.length || !(yMax > yMin)) return;
+      pageCheck(height + 50);
 
-          doc.moveDown(0.6);
+      const padL = 42, padB = 16, padT = 14;
+      const x0 = left + padL, y0 = doc.y + padT;
+      const w = contentWidth - padL - 10, h = height - padT - padB;
+      const X = f => x0 + f * w;
+      const Y = v => y0 + (yMax - Math.min(yMax, Math.max(yMin, v))) / (yMax - yMin) * h;
 
-          const allFindings = (item.chartData || [])
-            .flatMap(c => describeLocalChart(c.local, item.dateRange).findings);
+      doc.font(BOLD).fontSize(8.5).fillColor("#222222").text(title, left, doc.y, { width: contentWidth });
 
-          if (allFindings.length) {
-            doc
-              .font(BOLD)
-              .fontSize(9.5)
-              .fillColor("#1a6b3a")
-              .text("KLUCZOWE ODCZYTY (porównanie z progami na wykresach)");
+      for (const s of series) {
+        for (const g of s.gaps || []) doc.save().rect(X(g.from), y0, X(g.to) - X(g.from), h).fill("#dddddd").restore();
+      }
 
-            doc
-              .font(REGULAR)
-              .fontSize(8.5)
-              .fillColor("#222222");
+      doc.save().rect(x0, y0, w, h).lineWidth(0.5).strokeColor("#888888").stroke().restore();
 
-            for (const line of allFindings.slice(0, 12)) {
-              pageCheck(60);
-              doc.text(`• ${line}`);
-            }
+      // Podziałki jak na wykresie źródłowym (krok osi z odczytu), inaczej 4 równe części.
+      const ticks = step && (yMax - yMin) / step <= 10 ? Math.round((yMax - yMin) / step) : 4;
+      for (let i = 0; i <= ticks; i++) {
+        const v = yMin + (yMax - yMin) * i / ticks;
+        const y = Y(v);
+        doc.save().moveTo(x0, y).lineTo(x0 + w, y).lineWidth(0.3).strokeColor("#e2e2e2").stroke().restore();
+        doc.font(REGULAR).fontSize(6.5).fillColor("#555555").text(fmtN(v, yMax - yMin < 5 ? 2 : 1), left, y - 3, { width: padL - 4, align: "right" });
+      }
 
-            doc.moveDown(0.6);
-          }
+      for (const t of thresholds) {
+        doc.save().moveTo(x0, Y(t.value)).lineTo(x0 + w, Y(t.value)).dash(3, { space: 2 }).lineWidth(0.7).strokeColor(t.color || "#9400d3").stroke().undash().restore();
+      }
 
-          for (
-            let index = 0;
-            index <
-            item.chartFiles.length;
-            index++
-          ) {
-            const file =
-              item.chartFiles[
-                index
-              ];
+      for (const s of series) {
+        doc.save().lineWidth(0.8).strokeColor(s.color);
+        let prev = null;
+        for (const [f, v] of s.samples) {
+          if (prev && f - prev <= 0.01) doc.lineTo(X(f), Y(v));
+          else doc.moveTo(X(f), Y(v));
+          prev = f;
+        }
+        doc.stroke().restore();
+      }
 
-            if (
-              !fs.existsSync(file)
-            ) {
-              continue;
-            }
+      const a = parseUsDateTime(dateRange && dateRange.start), b = parseUsDateTime(dateRange && dateRange.end);
+      doc.font(REGULAR).fontSize(6.5).fillColor("#555555");
+      if (a) doc.text(fmtPlDateTime(a), x0, y0 + h + 3, { width: 100 });
+      if (b) doc.text(fmtPlDateTime(b), x0 + w - 100, y0 + h + 3, { width: 100, align: "right" });
 
-            pageCheck(315);
-
-            try {
-              doc
-                .font(BOLD)
-                .fontSize(9)
-                .fillColor("#333333")
-                .text(
-                  `Wykres ${index + 1}`
-                );
-
-              doc.moveDown(0.2);
-
-              const chartInfo =
-                (item.chartData || [])[index] || null;
-
-              if (chartInfo && chartInfo.title) {
-                doc
-                  .font(REGULAR)
-                  .fontSize(8.5)
-                  .fillColor("#333333")
-                  .text(chartInfo.title);
-              }
-
-              doc.image(
-                file,
-                {
-                  fit: [
-                    500,
-                    270
-                  ],
-
-                  align:
-                    "center"
-                }
-              );
-
-              doc.moveDown(0.3);
-
-              // --- Odczyt lokalny (z obrazu, bez wysyłania na zewnątrz) ---
-              if (chartInfo && chartInfo.local && chartInfo.local.ok) {
-                const d = describeLocalChart(chartInfo.local, item.dateRange);
-
-                pageCheck(120);
-
-                doc
-                  .font(BOLD)
-                  .fontSize(8.5)
-                  .fillColor("#1a6b3a")
-                  .text("Odczyt wartości z wykresu (lokalnie, z obrazu):");
-
-                doc
-                  .font(REGULAR)
-                  .fontSize(7.8)
-                  .fillColor("#222222");
-
-                for (const line of d.lines) {
-                  pageCheck(40);
-                  doc.text(line.startsWith("   ") ? "      " + line.trim() : "• " + line);
-                }
-              } else if (chartInfo && chartInfo.local && !chartInfo.local.ok && chartInfo.local.reason) {
-                doc
-                  .font(REGULAR)
-                  .fontSize(7.5)
-                  .fillColor("#999999")
-                  .text(`Odczyt lokalny niemożliwy: ${chartInfo.local.reason}.`);
-              }
-
-              // --- Wartości z wykresu ---
-              if (chartInfo && chartInfo.points && chartInfo.points.length) {
-                const s = chartInfo.summary || {};
-
-                doc
-                  .font(BOLD)
-                  .fontSize(8.5)
-                  .fillColor("#1a4d8f")
-                  .text(
-                    `Wartości odczytane ze strony (${chartInfo.points.length} pkt)` +
-                    (s.min !== undefined
-                      ? ` — min: ${s.min}, max: ${s.max}, średnia: ${s.avg}, ostatnia: ${s.last}`
-                      : "")
-                  );
-
-                doc
-                  .font(REGULAR)
-                  .fontSize(7.5)
-                  .fillColor("#333333");
-
-                for (const p of chartInfo.points.slice(0, 24)) {
-                  pageCheck(60);
-                  doc.text(
-                    `• ${p.label}` +
-                    (p.value !== null && p.value !== undefined && !/\d/.test(String(p.label))
-                      ? `  [${p.value}]`
-                      : "")
-                  );
-                }
-
-                if (chartInfo.points.length > 24) {
-                  doc.text(
-                    `… oraz ${chartInfo.points.length - 24} kolejnych punktów (pełna lista w data.json)`
-                  );
-                }
-              }
-
-              if (chartInfo && chartInfo.vision) {
-                const v = chartInfo.vision;
-
-                doc
-                  .font(BOLD)
-                  .fontSize(8.5)
-                  .fillColor("#8a5a00")
-                  .text(
-                    "Odczyt z obrazu (AI) — szacunkowy, zweryfikuj z wykresem:"
-                  );
-
-                doc
-                  .font(REGULAR)
-                  .fontSize(7.5)
-                  .fillColor("#333333");
-
-                if (v.x_axis || v.y_axis) {
-                  doc.text(
-                    `Oś X: ${v.x_axis || "?"} | Oś Y: ${v.y_axis || "?"}`
-                  );
-                }
-
-                for (const serie of (v.series || []).slice(0, 8)) {
-                  doc.text(
-                    `• ${serie.name || "seria"}: min ${serie.min ?? "?"}, max ${serie.max ?? "?"}, ostatnia ${serie.last ?? "?"}` +
-                    (Array.isArray(serie.labeled_values) && serie.labeled_values.length
-                      ? `, opisane: ${serie.labeled_values.slice(0, 12).join("; ")}`
-                      : "")
-                  );
-                }
-
-                if (v.notes) {
-                  doc.text(`Uwagi: ${cleanText(v.notes)}`);
-                }
-              }
-
-              if (
-                chartInfo &&
-                !(chartInfo.points && chartInfo.points.length) &&
-                !chartInfo.vision &&
-                !(chartInfo.local && chartInfo.local.ok)
-              ) {
-                doc
-                  .font(REGULAR)
-                  .fontSize(7.5)
-                  .fillColor("#999999")
-                  .text(
-                    "Brak odczytu wartości z tego wykresu. Zainstaluj pakiety: npm install pngjs tesseract.js @tesseract.js-data/eng (odczyt lokalny) lub włącz AAA_VISION=1."
-                  );
-              }
-
-              doc.moveDown(0.7);
-
-            } catch {}
-          }
+      if (series.length > 1 || series.some(s => s.label)) {
+        let lx = x0 + 110;
+        for (const s of series) {
+          doc.save().rect(lx, y0 + h + 5, 8, 3).fill(s.color).restore();
+          doc.font(REGULAR).fontSize(6.5).fillColor("#333333").text(s.label || "", lx + 11, y0 + h + 3, { width: 90 });
+          lx += 100;
         }
       }
 
-      // ======================================================
-      // PORÓWNANIE ANALIZATORÓW (ten sam typ wykresu)
-      // ======================================================
+      doc.x = left;
+      doc.y = y0 + h + padB + 4;
+    }
 
-      const comparison = buildChartComparison(results);
+    function chartReconstruction(chart, dateRange, label) {
+      const local = chart.local;
+      drawReconstructed({
+        title: `${label} — odtworzony z odczytu${chart.uncertain ? " (odczyt niepewny)" : ""}`,
+        series: local.series.map(s => ({ color: SERIES_PDF_COLORS[s.color] || "#333333", samples: s.samples || [], gaps: s.gaps || [], label: `seria ${s.color}` })),
+        yMin: local.axis.bottom,
+        yMax: local.axis.top,
+        step: local.axis.step,
+        thresholds: local.thresholds.map(t => ({ value: t.value, color: t.color === "żółta" ? "#c9a800" : "#9400d3" })),
+        dateRange
+      });
+    }
 
-      if (comparison.length) {
-        doc.addPage();
+    const ordered = sortByPriority(results);
+    const placeOf = r => `J${r.jno} — ${r.model}, ${r.location.customer}`;
+    const firstAction = r => (r.analysis.actions[0] && r.analysis.actions[0].text) || "";
 
-        heading(
-          "PORÓWNANIE ANALIZATORÓW — TE SAME WYKRESY",
-          14
-        );
+    // ======================================================
+    // STRONA 1: PODSUMOWANIE
+    // ======================================================
 
-        doc
-          .font(REGULAR)
-          .fontSize(8.5)
-          .fillColor("#555555")
-          .text("Wartości odczytane lokalnie z obrazów wykresów (pierwsza seria na wykresie). Odczyt przybliżony.");
+    doc.font(BOLD).fontSize(21).fillColor("#111111").text("RAPORT SERWISOWY", { align: "center" });
+    doc.fontSize(15).text("QuidelOrtho e-Connectivity", { align: "center" });
+    doc.moveDown(0.3);
+    doc.font(REGULAR).fontSize(9).fillColor("#555555").text(`Wygenerowano: ${formatDate(new Date())}`, { align: "center" });
+    doc.moveDown(1);
 
-        doc.moveDown(0.6);
+    heading("PODSUMOWANIE", 14);
+    field("Sprawdzone analizatory", String(analyzerCount));
+    field("Aktywne alerty", String(results.length));
+    field("Alerty z odczytanym AAA", String(results.filter(r => r.aaaVerified).length));
+    doc.moveDown(0.6);
 
-        for (const group of comparison) {
-          pageCheck(120);
+    table(
+      [
+        { header: "Poziom", width: 55 },
+        { header: "Aparat i placówka", width: 120 },
+        { header: "Alert", width: 80 },
+        { header: "Co pokazują dane", width: 160 },
+        { header: "Zalecenie", width: 110 }
+      ],
+      ordered.map(r => [r.analysis.priority, placeOf(r), r.alertName, r.analysis.priorityReason, firstAction(r)])
+    );
 
-          doc
-            .font(BOLD)
-            .fontSize(9.5)
-            .fillColor("#1a4d8f")
-            .text(group.title.replace(/\s*--?\s*[A-Z]?\d{5,}\s*$/i, ""));
+    subheading("Najważniejsze wnioski");
+    const conclusions = ordered
+      .filter(r => r.analysis.priority === "WYSOKI" || r.analysis.priority === "ŚREDNI")
+      .slice(0, 4)
+      .map(r => `J${r.jno} (${r.location.customer}): ${r.analysis.priorityReason}`);
+    const remote = results.filter(r => r.analysis.priority === "ZDALNIE");
+    if (remote.length) {
+      conclusions.push(`${remote.length} alert(y) bez oceny technicznej (brak łączności lub danych): ${remote.map(r => `J${r.jno}`).join(", ")}. Najpierw odzyskać widoczność.`);
+    }
+    if (!conclusions.length) conclusions.push("W tych danych nie widać parametrów pracujących na granicy wydajności.");
+    conclusions.slice(0, 5).forEach((c, i) => paragraph(`${i + 1}. ${c}`));
 
-          doc
-            .font(REGULAR)
-            .fontSize(8.3)
-            .fillColor("#222222");
+    // ======================================================
+    // SEKCJE APARATÓW
+    // ======================================================
 
-          for (const row of group.rows) {
-            const f = n => fmtChartNum(n, row.res);
-            doc.text(
-              `• J${row.jno}: ostatnia ${f(row.last)}, średnia ${f(row.avg)}, min ${f(row.min)}, maks ${f(row.max)}, trend ${signedChartNum(row.trend, row.res)}` +
-              (row.thr.length ? `, linie: ${row.thr.map(f).join(" / ")}` : "")
-            );
-          }
-
-          doc.moveDown(0.5);
-        }
-      }
-
-      // ======================================================
-      // READ ONLY
-      // ======================================================
-
+    for (const item of ordered) {
+      const a = item.analysis;
       doc.addPage();
 
-      heading(
-        "TRYB READ-ONLY",
-        15
-      );
+      doc.font(BOLD).fontSize(17).fillColor("#111111").text(`${item.model} — J${item.jno}`);
+      doc.font(BOLD).fontSize(12).text(`${item.alertName} · priorytet ${a.priority}`);
+      doc.moveDown(0.2);
+      paragraph(a.priorityReason, 9.5, "#222222");
+      doc.moveDown(0.4);
 
-      doc
-        .font(REGULAR)
-        .fontSize(10)
-        .fillColor("#333333")
-        .text(
-          "Agent analizuje dane e-Connectivity i AAA, ale nie wykonuje zmian na analizatorze."
+      field("Placówka", item.location.customer);
+      field("Adres", item.location.address);
+      field("Miasto", item.location.city);
+      if (item.asset) {
+        field("Status w bazie", item.asset.excelStatus);
+        field("Software", item.asset.softwareVersion);
+      }
+      field("Status e-Connectivity", item.status);
+      field("Zakres danych AAA", item.dateRange.start ? `${item.dateRange.start} – ${item.dateRange.end}` : "brak pewnego odczytu");
+      if (item.error) field("Błąd analizy", item.error);
+
+      if (a.missing.length) {
+        subheading("Kompletność danych");
+        paragraph(`Brakuje: ${a.missing.join("; ")}.`);
+      }
+
+      if (a.readings.length) {
+        subheading("Tabela odczytów");
+        table(
+          [
+            { header: "Parametr", width: 150 },
+            { header: "Odczyt", width: 110 },
+            { header: "Odniesienie", width: 130 },
+            { header: "Ocena", width: 110 }
+          ],
+          a.readings.map(r => [r.param, r.value, r.ref, r.assessment])
         );
+      }
 
-      doc.moveDown(0.7);
+      const charts = (item.chartData || []).filter(c => c.local && c.local.ok && c.local.series.length && !(c.titleCheck && c.titleCheck.ok === false));
+      if (charts.length) {
+        subheading("Wykresy odtworzone z danych");
+        for (const c of charts) chartReconstruction(c, item.dateRange, CHART_KIND_LABEL[c.kind] || c.title || "Wykres");
+      }
 
-      doc.text(
-        "Agent NIE wykonuje:\n\n" +
-        "• Save\n" +
-        "• Apply\n" +
-        "• zmian konfiguracji\n" +
-        "• automatycznych adjustmentów\n" +
-        "• resetów\n" +
-        "• service commands"
-      );
+      subheading("Co widać");
+      for (const o of a.observations) statusLine(o.status, o.text);
 
-      doc.end();
+      subheading("Co to może oznaczać");
+      for (const h of a.hypotheses) paragraph(h);
+
+      subheading("Zalecane działania");
+      a.actions.forEach((act, i) => {
+        pageCheck(45);
+        doc.x = left;
+        doc.font(REGULAR).fontSize(9.3).fillColor("#333333")
+          .text(`${i + 1}. ${act.text} (${act.mode})${act.criterion ? ` Kryterium sukcesu: ${act.criterion}.` : ""}`, { indent: 6, lineGap: 1.5 });
+        doc.moveDown(0.1);
+      });
+
+      // Wykresy źródłowe AAA z odczytem lokalnym.
+      if (item.chartFiles.length) {
+        doc.addPage();
+        heading("WYKRESY ŹRÓDŁOWE AAA", 13);
+        paragraph("Obrazy pobrane z AAA. Pod każdym: walidacja odczytu i wartości odczytane lokalnie z pikseli.", 8.5, "#555555");
+        doc.moveDown(0.4);
+
+        item.chartFiles.forEach((file, index) => {
+          if (!fs.existsSync(file)) return;
+          pageCheck(330);
+          const info = (item.chartData || [])[index] || null;
+          try {
+            doc.x = left;
+            doc.font(BOLD).fontSize(9).fillColor("#333333").text(`Wykres ${index + 1}${info && info.title ? `: ${info.title}` : ""}`);
+            if (info && info.validity) {
+              doc.font(REGULAR).fontSize(7.8).fillColor(info.validity === "wiarygodny" ? "#1a6b3a" : "#a04000").text(`Walidacja: ${info.validity}.`);
+            }
+            // Pozycja liczona jawnie, żeby tekst pod obrazem go nie nachodził.
+            const img = doc.openImage(file);
+            const k = Math.min(500 / img.width, 260 / img.height, 1);
+            const iw = img.width * k, ih = img.height * k;
+            if (doc.y + ih > bottomLimit()) doc.addPage();
+            const iy = doc.y;
+            doc.image(img, left + (contentWidth - iw) / 2, iy, { width: iw, height: ih });
+            doc.x = left;
+            doc.y = iy + ih + 4;
+
+            if (info && info.local && info.local.ok) {
+              doc.font(REGULAR).fontSize(7.6).fillColor("#222222");
+              for (const line of describeLocalChart(info.local, item.dateRange).lines) {
+                pageCheck(40);
+                doc.x = left;
+                doc.text(line.startsWith("   ") ? "      " + line.trim() : "• Odczyt: " + line);
+              }
+            } else if (info && info.local && info.local.reason) {
+              doc.font(REGULAR).fontSize(7.5).fillColor("#999999").text(`Brak pewnego odczytu: ${info.local.reason}.`);
+            } else if (info && !info.local) {
+              doc.font(REGULAR).fontSize(7.5).fillColor("#999999").text("Brak pewnego odczytu — odczyt lokalny wyłączony (npm install pngjs tesseract.js @tesseract.js-data/eng).");
+            }
+
+            if (info && info.points && info.points.length) {
+              const s = info.summary || {};
+              doc.font(BOLD).fontSize(8).fillColor("#1a4d8f").text(
+                `Fakt: wartości ze strony AAA (${info.points.length} pkt)` +
+                (s.min !== undefined ? ` — min ${s.min}, maks ${s.max}, średnia ${s.avg}, ostatnia ${s.last}` : "")
+              );
+            }
+
+            if (info && info.vision) {
+              const v = info.vision;
+              doc.font(BOLD).fontSize(8).fillColor("#8a5a00").text("Odczyt AI z obrazu (AAA_VISION) — szacunkowy, zweryfikować z wykresem:");
+              doc.font(REGULAR).fontSize(7.5).fillColor("#333333");
+              for (const serie of (v.series || []).slice(0, 8)) {
+                doc.text(`• ${serie.name || "seria"}: min ${serie.min ?? "?"}, maks ${serie.max ?? "?"}, ostatnia ${serie.last ?? "?"}`);
+              }
+            }
+            doc.moveDown(0.6);
+          } catch {}
+        });
+      }
     }
-  );
+
+    // ======================================================
+    // PORÓWNANIE APARATÓW TEGO SAMEGO MODELU
+    // ======================================================
+
+    const groups = new Map();
+    for (const r of results) {
+      for (const c of r.chartData || []) {
+        if (!c.kind || !c.local || !c.local.ok || !c.local.series.length) continue;
+        if (c.titleCheck && c.titleCheck.ok === false) continue;
+        const key = `${r.model}|${c.kind}`;
+        if (!groups.has(key)) groups.set(key, { model: r.model, kind: c.kind, rows: [] });
+        const g = groups.get(key);
+        if (!g.rows.some(x => x.r.jno === r.jno)) g.rows.push({ r, c });
+      }
+    }
+    const comparable = [...groups.values()].filter(g => g.rows.length >= 2);
+
+    if (comparable.length || comparisonNotes.length) {
+      doc.addPage();
+      heading("PORÓWNANIE APARATÓW TEGO SAMEGO MODELU", 14);
+      paragraph("Wspólna skala osi dla porównywanych aparatów. Pierwsza seria każdego wykresu. Luki w danych szarym pasem.", 8.5, "#555555");
+      doc.moveDown(0.4);
+
+      for (const g of comparable) {
+        const yMin = Math.min(...g.rows.map(x => x.c.local.axis.bottom));
+        const yMax = Math.max(...g.rows.map(x => x.c.local.axis.top));
+        drawReconstructed({
+          title: `${g.model} — ${CHART_KIND_LABEL[g.kind]}`,
+          series: g.rows.map((x, i) => ({
+            color: COMPARE_COLORS[i % COMPARE_COLORS.length],
+            samples: x.c.local.series[0].samples || [],
+            gaps: x.c.local.series[0].gaps || [],
+            label: `J${x.r.jno}`
+          })),
+          yMin, yMax,
+          step: g.rows[0].c.local.axis.step,
+          thresholds: g.rows[0].c.local.thresholds.map(t => ({ value: t.value, color: t.color === "żółta" ? "#c9a800" : "#9400d3" })),
+          dateRange: g.rows[0].r.dateRange,
+          height: 150
+        });
+
+        const ref = g.rows[0].c.local.series[0];
+        table(
+          [
+            { header: "Aparat", width: 90 },
+            { header: "Średnia", width: 70 },
+            { header: "Maks.", width: 70 },
+            { header: "Ostatnia", width: 70 },
+            { header: "Różnica średnich vs pierwszy", width: 120 }
+          ],
+          g.rows.map(x => {
+            const s = x.c.local.series[0], res = x.c.local.axis.resolution;
+            return [`J${x.r.jno}`, fmtChartNum(s.avg, res), fmtChartNum(s.max, res), fmtChartNum(s.last, res), signedChartNum(s.avg - ref.avg, res)];
+          })
+        );
+      }
+
+      const dutyNotes = comparisonNotes.filter(n => n.kind === "duty");
+      if (dutyNotes.length) {
+        subheading("Duty przy ≈ 27 °C otoczenia (dopasowanie liniowe)");
+        table(
+          [
+            { header: "Model", width: 90 },
+            { header: "Aparat", width: 80 },
+            { header: "Duty przy ≈ 27 °C", width: 100 },
+            { header: "Różnica vs najlepszy", width: 120 }
+          ],
+          dutyNotes.map(n => [n.model, `J${n.jno}`, `${fmtN(n.value)}%${n.extrapolated ? " (ekstrapolacja)" : ""}`, `${n.delta >= 0 ? "+" : ""}${fmtN(n.delta)} pp vs J${n.ref}`])
+        );
+        paragraph("Różnica ≥ 10 pp przy podobnym otoczeniu to wskazówka na obniżoną sprawność. Samo porównanie nie dowodzi usterki.", 8.5);
+      }
+    }
+
+    // ======================================================
+    // ALERTY ŁĄCZNOŚCI
+    // ======================================================
+
+    const connectivity = ordered.filter(r => r.analysis.family === "dataLogger");
+    if (connectivity.length) {
+      doc.addPage();
+      heading("ALERTY ŁĄCZNOŚCI", 14);
+      table(
+        [
+          { header: "Aparat i placówka", width: 140 },
+          { header: "Ostatnie połączenie", width: 90 },
+          { header: "Bez łączności", width: 70 },
+          { header: "Kroki", width: 200 }
+        ],
+        connectivity.map(r => {
+          const last = parseUsDateTime(r.dataLogger && r.dataLogger.lastConnected);
+          return [
+            placeOf(r),
+            last ? fmtPlDateTime(last) : "brak pewnego odczytu",
+            r.analysis.elapsedText || "?",
+            r.analysis.actions.map((x, i) => `${i + 1}. ${x.text}`).join(" ")
+          ];
+        })
+      );
+      paragraph("Aparat bez łączności jest niewidoczny — jego stanu technicznego nie oceniamy.", 8.5);
+    }
+
+    // ======================================================
+    // PLAN DZIAŁAŃ
+    // ======================================================
+
+    doc.addPage();
+    heading("PLAN DZIAŁAŃ", 14);
+    const planRows = [];
+    for (const r of ordered) {
+      for (const act of r.analysis.actions) {
+        planRows.push([act.text, `J${r.jno}`, act.mode, PRIORITY_TERM[r.analysis.priority] || ""]);
+      }
+    }
+    table(
+      [
+        { header: "Działanie", width: 260 },
+        { header: "Aparat", width: 70 },
+        { header: "Tryb", width: 70 },
+        { header: "Termin", width: 110 }
+      ],
+      planRows
+    );
+
+    // ======================================================
+    // METODYKA I OGRANICZENIA
+    // ======================================================
+
+    heading("METODYKA I OGRANICZENIA", 14);
+    [
+      "Źródła: dashboard e-Connectivity (alerty, J-number), baza Excel (model, placówka, software), strony AAA (zakres dat, reguły, wykresy).",
+      "Wykresy AAA to obrazy PNG bez danych liczbowych w kodzie strony. Wartości odczytano lokalnie z pikseli: skala osi Y z OCR etykiet, serie i progi po kolorach MS Chart. Dokładność odczytu podano przy każdym wykresie (≈ ±1 piksel w jednostkach osi).",
+      "Oś czasu przyjęto jako liniową na zakres dat AAA. Godziny z wykresów są przybliżone (±1–2 h) i oznaczone „ok.”. Dokładne czasy pochodzą tylko z danych tekstowych.",
+      "Luki w danych wykryto jako odcinki idealnie liniowe dłuższe niż ≈ 3% szerokości wykresu (AAA łączy luki prostą linią) oraz jako odcinki bez pikseli serii. W seriach z szumem usunięto je ze statystyk. W seriach gładkich (np. powolna zmiana temperatury) prosty odcinek może być prawdziwymi danymi — oznaczono go jako możliwą lukę i zostawiono. Poziome plateau (np. nasycenie 100%) zostaje w danych; pozioma luka nie jest wykrywana.",
+      "Odczyt uznano za wiarygodny, gdy tytuł zawiera J-number aparatu, skala ma równe kroki potwierdzone OCR, progi leżą w zakresie osi, a seria ma wystarczająco pikseli. Wykres z innym J-number wyłączono z analizy.",
+      "Populacje na wykresach adjustment liczone z pikseli niedoszacowują gęste obszary — traktować orientacyjnie.",
+      "Czas od ostatniego połączenia liczony względem zegara komputera generującego raport; strefa czasowa dashboardu nie jest weryfikowana.",
+      `Odczyt AI z obrazów (AAA_VISION): ${process.env.AAA_VISION === "1" ? "WŁĄCZONY — obrazy wysłano do usługi zewnętrznej za zgodą użytkownika" : "wyłączony — żadne obrazy nie opuściły komputera"}.`,
+      "Nie zweryfikowano: stanu aparatów na miejscu, historii serwisowej, przyczyn usterek. Każda przyczyna jest hipotezą do potwierdzenia pomiarem przez FSE.",
+      "Tryb tylko do odczytu: agent nie wykonał Save, Apply, zmian konfiguracji, adjustmentów, resetów ani komend serwisowych."
+    ].forEach(t => { paragraph(`• ${t}`, 8.8); doc.moveDown(0.15); });
+
+    doc.end();
+  });
 }
 
 // ============================================================
@@ -4005,12 +4353,12 @@ async function runAgentInner() {
       );
 
     result.analysis =
-      genericLiveAnalysis(
+      analyzeAlert(
         result
       );
 
     console.log(
-      `DECYZJA: ${result.analysis.decision}`
+      `PRIORYTET: ${result.analysis.priority} — ${result.analysis.priorityReason}`
     );
 
     results.push(
@@ -4023,6 +4371,15 @@ async function runAgentInner() {
   }
 
   // ==========================================================
+  // PORÓWNANIE APARATÓW
+  // ==========================================================
+
+  const comparisonNotes =
+    compareAnalyzers(
+      results
+    );
+
+  // ==========================================================
   // MASTER JSON
   // ==========================================================
 
@@ -4032,7 +4389,7 @@ async function runAgentInner() {
     JSON.stringify(
       {
         version:
-          "LIVE-v1",
+          "v3",
 
         generatedAt:
           new Date()
@@ -4051,6 +4408,9 @@ async function runAgentInner() {
 
         activeAlerts:
           results.length,
+
+        comparison:
+          comparisonNotes,
 
         results:
           results.map(
@@ -4120,7 +4480,8 @@ async function runAgentInner() {
 
   await generatePDF(
     results,
-    state.analyzerCount
+    state.analyzerCount,
+    comparisonNotes
   );
 
   // ==========================================================
@@ -4174,7 +4535,7 @@ async function runAgentInner() {
     );
 
     console.log(
-      `  DECYZJA: ${result.analysis.decision}`
+      `  PRIORYTET: ${result.analysis.priority}`
     );
 
     console.log("");
@@ -4255,7 +4616,10 @@ module.exports = {
   shutdownChartReader,
   describeLocalChart,
   analyzeAlert,
-  genericLiveAnalysis,
+  compareAnalyzers,
+  parseUsDateTime,
+  titleJnoCheck,
+  chartKind,
   PDF_FILE,
   OUTPUT_DIR
 };
