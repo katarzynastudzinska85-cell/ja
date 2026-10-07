@@ -12,12 +12,13 @@ i tworzy raport PDF po polsku. Działa tylko w trybie odczytu. Zasady analizy: `
 4. Otwórz PowerShell w tym folderze i wpisz raz:
 
    ```
-   npm install
+   npm.cmd install
    ```
 
 ## Każde kolejne uruchomienie
 
-1. W PowerShell, w folderze skryptu: `npm start`
+1. Kliknij dwukrotnie `start.cmd` (albo `start_z_podstronami.cmd`, żeby dodać treść podstron AAA).
+   Zamiast tego w PowerShell, w folderze skryptu: `node live_diagnostic_agent.js`
 2. Otworzy się Edge. Zaloguj się i przejdź do dashboardu z tabelami analizatorów.
 3. Poczekaj, aż tabele się załadują, wróć do PowerShell i naciśnij ENTER.
 4. Wynik: folder `aaa_output_live`
@@ -50,8 +51,11 @@ a na końcu kopię całej strony jako obraz.
 Jak ustawić opcję w PowerShell (na jedno uruchomienie):
 
 ```
-$env:AAA_FOLLOW_LINKS="1"; npm start
+$env:AAA_FOLLOW_LINKS="1"; node live_diagnostic_agent.js
 ```
+
+Komunikat „running scripts is disabled on this system” przy `npm`: Windows blokuje skrypt PowerShella `npm.ps1`.
+Uruchamiaj przez `node live_diagnostic_agent.js` albo pliki `.cmd`. Do jednorazowej instalacji pakietów użyj `npm.cmd install`.
 
 ## Nie udostępniaj
 
