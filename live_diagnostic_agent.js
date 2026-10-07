@@ -1097,6 +1097,289 @@ async function extractGenericAAAEvidence(page) {
   return {rules,conditionCodes,linkLabels,rawTextSanitized:cleanText(raw)};
 }
 
+// ============================================================
+// PEŁNA TREŚĆ STRONY AAA (tekst źródłowy do raportu)
+// Struktura: nagłówki, akapity, listy z numeracją (1. / a. / i.), tabele
+// z wyróżnionymi wierszami, pola tekstowe. Tylko odczyt DOM — bez klikania.
+// ============================================================
+
+// Funkcja wykonywana w przeglądarce (musi być samowystarczalna).
+function collectPageBlocksInBrowser() {
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "CANVAS", "BUTTON", "SELECT", "OPTION", "INPUT", "MAP", "AREA", "IFRAME", "FRAME", "HEAD"]);
+  const BLOCK = new Set(["DIV", "P", "SECTION", "ARTICLE", "MAIN", "HEADER", "FOOTER", "ASIDE", "NAV", "FORM", "FIELDSET", "TABLE", "UL", "OL", "LI", "DL", "DT", "DD", "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE", "PRE", "CENTER", "TBODY", "THEAD", "TR", "TD", "TH", "TEXTAREA", "HR", "BR", "IMG", "SPAN-BLOCK"]);
+  const blocks = [];
+  const clean = s => String(s || "").replace(/\s+/g, " ").trim();
+
+  const visible = el => {
+    const cs = getComputedStyle(el);
+    return cs.display !== "none" && cs.visibility !== "hidden";
+  };
+
+  const isBlockEl = el => {
+    if (BLOCK.has(el.tagName)) return true;
+    const d = getComputedStyle(el).display;
+    return d === "block" || d === "list-item" || d === "table" || d === "flex" || d === "grid";
+  };
+
+  const roman = n => {
+    const map = [[1000, "m"], [900, "cm"], [500, "d"], [400, "cd"], [100, "c"], [90, "xc"], [50, "l"], [40, "xl"], [10, "x"], [9, "ix"], [5, "v"], [4, "iv"], [1, "i"]];
+    let out = "";
+    for (const [v, s] of map) while (n >= v) { out += s; n -= v; }
+    return out;
+  };
+
+  const marker = (list, index) => {
+    if (list.tagName !== "OL") return "•";
+    const start = Number(list.getAttribute("start") || 1);
+    const n = start + index;
+    const type = list.getAttribute("type") || "";
+    const css = getComputedStyle(list).listStyleType;
+    if (type === "a" || css === "lower-alpha" || css === "lower-latin") return String.fromCharCode(96 + ((n - 1) % 26) + 1) + ".";
+    if (type === "A" || css === "upper-alpha" || css === "upper-latin") return String.fromCharCode(64 + ((n - 1) % 26) + 1) + ".";
+    if (type === "i" || css === "lower-roman") return roman(n) + ".";
+    if (type === "I" || css === "upper-roman") return roman(n).toUpperCase() + ".";
+    return n + ".";
+  };
+
+  // Tekst elementu bez zagnieżdżonych list i tabel.
+  const ownText = el => {
+    let t = "";
+    for (const node of el.childNodes) {
+      if (node.nodeType === 3) t += node.textContent;
+      else if (node.nodeType === 1) {
+        if (SKIP.has(node.tagName) || node.tagName === "UL" || node.tagName === "OL" || node.tagName === "TABLE") continue;
+        if (!visible(node)) continue;
+        if (node.tagName === "BR") { t += " "; continue; }
+        t += ownText(node);
+      }
+    }
+    return t;
+  };
+
+  const bg = el => {
+    const c = getComputedStyle(el).backgroundColor;
+    return c && c !== "rgba(0, 0, 0, 0)" && c !== "transparent" ? c : "";
+  };
+
+  function walkList(list, level) {
+    const items = [];
+    let i = 0;
+    for (const li of list.children) {
+      if (li.tagName !== "LI" || !visible(li)) continue;
+      const text = clean(ownText(li));
+      if (text) items.push({ level, marker: marker(list, i), text });
+      i++;
+      for (const sub of li.querySelectorAll(":scope > ul, :scope > ol, :scope > div > ul, :scope > div > ol")) {
+        items.push(...walkList(sub, level + 1));
+      }
+      for (const img of li.querySelectorAll(":scope > img, :scope > div > img")) {
+        const alt = clean(img.getAttribute("alt") || img.getAttribute("title"));
+        items.push({ level: level + 1, marker: "", text: alt ? `[obraz: ${alt}]` : "[obraz]" });
+      }
+    }
+    return items;
+  }
+
+  function walkTable(table) {
+    const rows = [];
+    for (const tr of table.rows) {
+      if (!visible(tr)) continue;
+      const cells = [...tr.cells].map(c => clean(c.innerText || c.textContent));
+      if (!cells.some(Boolean)) continue;
+      const rowBg = bg(tr) || [...tr.cells].map(bg).find(Boolean) || "";
+      rows.push({ cells, header: [...tr.cells].every(c => c.tagName === "TH"), bg: rowBg });
+    }
+    return rows;
+  }
+
+  function walk(el, depth) {
+    if (!el || el.nodeType !== 1 || SKIP.has(el.tagName) || !visible(el)) return;
+    const tag = el.tagName;
+
+    if (/^H[1-6]$/.test(tag)) {
+      const t = clean(el.innerText);
+      if (t) blocks.push({ type: "heading", level: Number(tag[1]), text: t });
+      return;
+    }
+    if (tag === "UL" || tag === "OL") {
+      const items = walkList(el, 0);
+      if (items.length) blocks.push({ type: "list", items });
+      return;
+    }
+    if (tag === "TABLE") {
+      // Tabela układu strony (z blokami w środku) — schodzimy głębiej zamiast spłaszczać.
+      if (el.querySelector("table, ul, ol, h1, h2, h3, h4, textarea")) {
+        for (const cell of el.querySelectorAll(":scope > tbody > tr > td, :scope > tr > td, :scope > thead > tr > th, :scope > tbody > tr > th")) walk(cell, depth + 1);
+        return;
+      }
+      const rows = walkTable(el);
+      if (rows.length) blocks.push({ type: "table", rows, caption: clean(el.caption && el.caption.innerText) });
+      return;
+    }
+    if (tag === "TEXTAREA") {
+      const t = clean(el.value || el.textContent);
+      if (t) blocks.push({ type: "para", text: t, boxed: true });
+      return;
+    }
+    if (tag === "IMG") {
+      const alt = clean(el.getAttribute("alt") || el.getAttribute("title"));
+      const src = el.getAttribute("src") || "";
+      if (/chartaxd\.axd/i.test(src)) return; // wykresy mają własną sekcję
+      if (el.width >= 120 && el.height >= 60) blocks.push({ type: "image", text: alt });
+      return;
+    }
+
+    const hasBlockChild = [...el.children].some(c => !SKIP.has(c.tagName) && isBlockEl(c));
+    if (!hasBlockChild) {
+      const t = clean(el.innerText);
+      if (t) {
+        // Pogrubiony, krótki tekst bez kropki traktujemy jak nagłówek sekcji.
+        const fw = Number(getComputedStyle(el).fontWeight) || 400;
+        const fs = parseFloat(getComputedStyle(el).fontSize) || 12;
+        const looksHeading = t.length <= 90 && !/[.:]$/.test(t) && (fw >= 600 || fs >= 16);
+        blocks.push(looksHeading ? { type: "heading", level: fs >= 20 ? 2 : 3, text: t } : { type: "para", text: t });
+      }
+      return;
+    }
+
+    // Element mieszany: tekst bezpośredni + dzieci blokowe w kolejności dokumentu.
+    let inline = "";
+    const flush = () => {
+      const t = clean(inline);
+      if (t) blocks.push({ type: "para", text: t });
+      inline = "";
+    };
+    for (const node of el.childNodes) {
+      if (node.nodeType === 3) { inline += node.textContent; continue; }
+      if (node.nodeType !== 1 || SKIP.has(node.tagName) || !visible(node)) continue;
+      if (isBlockEl(node)) { flush(); walk(node, depth + 1); }
+      else inline += " " + (node.innerText || node.textContent || "");
+    }
+    flush();
+  }
+
+  walk(document.body, 0);
+
+  // Usuń sąsiadujące duplikaty (np. ten sam tekst w zagnieżdżonych kontenerach).
+  const out = [];
+  for (const b of blocks) {
+    const prev = out[out.length - 1];
+    if (prev && prev.type === b.type && prev.text && prev.text === b.text) continue;
+    out.push(b);
+  }
+  return out.slice(0, 3000);
+}
+
+function isHighlightColor(rgb) {
+  const m = String(rgb || "").match(/(\d+),\s*(\d+),\s*(\d+)/);
+  if (!m) return "";
+  const [r, g, b] = m.slice(1).map(Number);
+  if (r > 200 && g > 180 && b < 140) return "żółte";
+  if (r > 200 && g > 100 && g < 190 && b < 100) return "pomarańczowe";
+  if (r > 190 && g < 100 && b < 100) return "czerwone";
+  return "";
+}
+
+// Same słowa przycisków/linków-akcji to nie treść.
+const ACTION_WORDS = /^(save|apply|run|reset|cancel|ok|close|print|submit|back|next|help|aaa)$/i;
+
+function sanitizeBlocks(blocks) {
+  const cut = s => cleanText(s).slice(0, 4000);
+  return (blocks || []).filter(b => !(b.type === "para" && ACTION_WORDS.test(String(b.text).trim()))).map(b => {
+    if (b.type === "list") return { ...b, items: b.items.map(i => ({ ...i, text: cut(i.text) })) };
+    if (b.type === "table") {
+      return {
+        ...b,
+        caption: cut(b.caption),
+        rows: b.rows.map((r, i) => {
+          const highlight = r.header ? "" : isHighlightColor(r.bg);
+          // Pierwszy wiersz z kolorowym (nie wyróżniającym) tłem pełni rolę nagłówka, np. niebieski pasek.
+          const header = r.header || (i === 0 && b.rows.length > 1 && !!r.bg && !highlight);
+          return { cells: r.cells.map(cut), header, highlight: header ? "" : highlight };
+        })
+      };
+    }
+    return { ...b, text: cut(b.text) };
+  });
+}
+
+async function extractAAAContent(page) {
+  const sections = [];
+  for (const frame of page.frames()) {
+    try {
+      const raw = await frame.evaluate(collectPageBlocksInBrowser);
+      const blocks = sanitizeBlocks(raw);
+      if (blocks.length) sections.push({ source: frame === page.mainFrame() ? "strona AAA" : "ramka strony AAA", blocks });
+    } catch {}
+  }
+  return sections;
+}
+
+// Fakty z treści AAA: wiersze tabel wyróżnione kolorem na stronie (np. „Investigate”).
+function aaaContentFacts(result) {
+  const facts = [];
+  for (const section of result.aaaContent || []) {
+    let lastHeading = "";
+    for (const b of section.blocks) {
+      if (b.type === "heading") lastHeading = b.text;
+      if (b.type !== "table") continue;
+      const header = b.rows.find(r => r.header) || b.rows[0];
+      for (const r of b.rows) {
+        if (!r.highlight || r === header) continue;
+        const pairs = r.cells.map((c, i) => (header && header !== r && header.cells[i] && i > 0 ? `${header.cells[i]}: ${c}` : c)).filter(Boolean);
+        facts.push(`AAA wyróżnia (${r.highlight} tło) w tabeli „${b.caption || lastHeading || "bez tytułu"}”: ${pairs.join("; ")}.`);
+      }
+    }
+  }
+  return facts.slice(0, 12);
+}
+
+// Podstrony AAA (opt-in: AAA_FOLLOW_LINKS=1). Tylko linki z tej samej domeny, otwierane GET-em,
+// bez linków wyglądających na akcje (Save, Apply, Run, Reset, Delete, logowanie).
+const UNSAFE_LINK = /save|apply|run|reset|delete|remove|submit|update|logout|log\s*out|login|sign|wyloguj|javascript:|mailto:|__dopostback/i;
+
+async function extractSubpages(context, page, limit = 8) {
+  if (process.env.AAA_FOLLOW_LINKS !== "1") return [];
+
+  const origin = new URL(page.url()).origin;
+  const links = await page.locator("a[href]").evaluateAll(els => els.map(a => ({
+    href: a.href,
+    text: String(a.innerText || a.textContent || "").replace(/\s+/g, " ").trim()
+  }))).catch(() => []);
+
+  const seen = new Set();
+  const picked = links.filter(l => {
+    if (!l.text || !l.href) return false;
+    let u;
+    try { u = new URL(l.href); } catch { return false; }
+    if (u.origin !== origin) return false;
+    if (UNSAFE_LINK.test(l.text) || UNSAFE_LINK.test(u.pathname + u.search)) return false;
+    const key = u.pathname + u.search;
+    if (key === new URL(page.url()).pathname + new URL(page.url()).search || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, limit);
+
+  const out = [];
+  for (const link of picked) {
+    const sub = await context.newPage();
+    try {
+      const response = await sub.goto(link.href, { waitUntil: "domcontentloaded", timeout: 20000 });
+      const type = (response && response.headers()["content-type"]) || "";
+      if (!/html/i.test(type)) {
+        out.push({ title: cleanText(link.text), note: `dokument ${type.split(";")[0] || "nieznanego typu"} — nie odczytano treści`, sections: [] });
+      } else {
+        out.push({ title: cleanText(link.text), sections: await extractAAAContent(sub) });
+      }
+    } catch (error) {
+      out.push({ title: cleanText(link.text), note: `brak pewnego odczytu: ${cleanText(error.message).slice(0, 120)}`, sections: [] });
+    } finally {
+      await sub.close().catch(() => {});
+    }
+  }
+  return out;
+}
+
 function loadServiceKnowledge(){
   if(!fs.existsSync(KNOWLEDGE_FILE)){console.log("Service Knowledge: brak service_knowledge.json");return []}
   try{const p=JSON.parse(fs.readFileSync(KNOWLEDGE_FILE,"utf8"));const d=Array.isArray(p)?p:(p.documents||p.procedures||[]);console.log(`Service Knowledge: ${d.length} dokumentów/procedur.`);return d}catch(e){console.log(`Service Knowledge: błąd: ${cleanText(e.message)}`);return []}
@@ -3158,7 +3441,7 @@ function analyzeGeneric(result, charts) {
   checkCompleteness(result, A, [], charts);
 
   const ev = result.genericEvidence || {};
-  A.observations.push({ status: "Fakt", text: `AAA: ${ev.rules ? ev.rules.length : 0} linii z regułami/parametrami; condition codes: ${ev.conditionCodes && ev.conditionCodes.length ? ev.conditionCodes.join(", ") : "brak pewnego odczytu"}.` });
+  A.observations.push({ status: "Fakt", text: `AAA: ${plural(ev.rules ? ev.rules.length : 0, "linia", "linie", "linii")} z regułami/parametrami; condition codes: ${ev.conditionCodes && ev.conditionCodes.length ? ev.conditionCodes.join(", ") : "brak pewnego odczytu"}.` });
 
   let exceed = 0;
   for (const c of charts) {
@@ -3168,9 +3451,20 @@ function analyzeGeneric(result, charts) {
     for (const s of c.local.series) if (s.versus.some(v => v.above >= 0.02 && v.above <= 0.98)) exceed++;
   }
 
-  if (!charts.length) {
+  const highlighted = aaaContentFacts(result);
+  const hasContent = (result.aaaContent || []).some(s => s.blocks.length);
+
+  if (highlighted.length) {
+    // Wiersz wyróżniony przez AAA (np. „Investigate”) to odchylenie widoczne w danych źródłowych.
+    A.priority = "ŚREDNI";
+    A.priorityReason = highlighted[0].replace(/^AAA wyróżnia/, "AAA wyróżnia obszar") +
+      (highlighted.length > 1 ? ` (+${highlighted.length - 1} kolejne)` : "");
+  } else if (!charts.length && !hasContent) {
     A.priority = "ZDALNIE";
-    A.priorityReason = "Brak pewnego odczytu wykresów — brak danych do oceny technicznej.";
+    A.priorityReason = "Brak pewnego odczytu wykresów i treści AAA — brak danych do oceny technicznej.";
+  } else if (!charts.length) {
+    A.priority = "NISKI";
+    A.priorityReason = "AAA nie wyróżnia żadnego obszaru, a wykresów nie odczytano; w tych danych nie widać odchylenia.";
   } else if (exceed) {
     A.priority = "ŚREDNI";
     A.priorityReason = `${exceed} seria(e) przekracza(ją) linie progowe na wykresach; brak reguł dla tego alertu.`;
@@ -3201,10 +3495,19 @@ function analyzeAlert(result, now = new Date()) {
   }
 
   const charts = validateCharts(result);
-  if (family === "dataLogger") return analyzeDataLogger(result, now);
-  if (family === "supplyThermal") return analyzeSupplyThermal(result, charts);
-  if (family === "cmRing") return analyzeCmRing(result, charts);
-  return analyzeGeneric(result, charts);
+  const A =
+    family === "dataLogger" ? analyzeDataLogger(result, now) :
+    family === "supplyThermal" ? analyzeSupplyThermal(result, charts) :
+    family === "cmRing" ? analyzeCmRing(result, charts) :
+    analyzeGeneric(result, charts);
+
+  for (const fact of aaaContentFacts(result)) A.observations.push({ status: "Fakt", text: fact });
+
+  const hasGuidance = (result.aaaContent || []).some(s => s.blocks.some(b => b.type === "list"));
+  if (hasGuidance) {
+    A.actions.push({ text: "Przejść kroki rozwiązywania problemów z AAA (rozdział „Treść strony AAA” w tym raporcie), zaczynając od wyróżnionego obszaru.", criterion: "", mode: "na miejscu" });
+  }
+  return A;
 }
 
 // Porównanie aparatów tego samego modelu (CLAUDE.md 4.5, 6.1.7, 6.3.5).
@@ -3355,7 +3658,7 @@ function generatePDF(results, analyzerCount, comparisonNotes = []) {
       doc.moveDown(0.1);
     }
 
-    function table(columns, rows, size = 8) {
+    function table(columns, rows, size = 8, rowFills = []) {
       const pad = 3;
       const totalW = columns.reduce((s, c) => s + c.width, 0);
       const scale = contentWidth / totalW;
@@ -3387,7 +3690,7 @@ function generatePDF(results, analyzerCount, comparisonNotes = []) {
 
       pageCheck(60);
       drawRow(columns.map(c => c.header), BOLD, "#e8e8e8");
-      for (const r of rows) drawRow(r, REGULAR, null);
+      rows.forEach((r, i) => drawRow(r, REGULAR, rowFills[i] || null));
       doc.x = left;
       doc.moveDown(0.5);
     }
@@ -3464,6 +3767,87 @@ function generatePDF(results, analyzerCount, comparisonNotes = []) {
         thresholds: local.thresholds.map(t => ({ value: t.value, color: t.color === "żółta" ? "#c9a800" : "#9400d3" })),
         dateRange
       });
+    }
+
+    // Treść strony AAA jako Fakt (tekst źródłowy, bez interpretacji).
+    function renderContent(sections) {
+      for (const section of sections) {
+        if (sections.length > 1) paragraph(`Źródło: ${section.source}`, 7.8, "#777777");
+        for (const b of section.blocks) {
+          if (b.type === "heading") {
+            pageCheck(70);
+            doc.x = left;
+            doc.moveDown(0.35);
+            doc.font(BOLD).fontSize(b.level <= 2 ? 11 : 9.8).fillColor("#111111").text(b.text);
+            doc.moveDown(0.15);
+          } else if (b.type === "para") {
+            if (b.boxed) {
+              pageCheck(60);
+              const h = doc.font(REGULAR).fontSize(8.8).heightOfString(b.text, { width: contentWidth - 12 }) + 10;
+              const y = doc.y;
+              doc.save().rect(left, y, contentWidth, h).lineWidth(0.5).strokeColor("#999999").stroke().restore();
+              doc.font(REGULAR).fontSize(8.8).fillColor("#222222").text(b.text, left + 6, y + 5, { width: contentWidth - 12 });
+              doc.x = left;
+              doc.y = y + h + 4;
+            } else {
+              paragraph(b.text, 8.8, "#222222");
+            }
+          } else if (b.type === "list") {
+            doc.moveDown(0.1);
+            for (const it of b.items) {
+              pageCheck(36);
+              const indent = 6 + it.level * 16;
+              doc.font(REGULAR).fontSize(8.8).fillColor("#222222")
+                .text(`${it.marker ? it.marker + " " : ""}${it.text}`, left + indent, doc.y, { width: contentWidth - indent, lineGap: 1 });
+            }
+            doc.x = left;
+            doc.moveDown(0.3);
+          } else if (b.type === "table") {
+            const n = Math.min(10, Math.max(...b.rows.map(r => r.cells.length)));
+            const head = b.rows[0].header ? b.rows[0] : { cells: Array.from({ length: n }, () => "") };
+            const body = b.rows[0].header ? b.rows.slice(1) : b.rows;
+            if (b.caption) paragraph(b.caption, 8.8, "#111111");
+            table(
+              Array.from({ length: n }, (_, i) => ({ header: head.cells[i] || "", width: i === 0 ? 2.4 : 1 })),
+              body.map(r => {
+                const cells = r.cells.slice(0, n);
+                while (cells.length < n) cells.push("");
+                if (r.highlight) cells[0] = `[wyróżnione na stronie: ${r.highlight} tło] ${cells[0]}`;
+                return cells;
+              }),
+              7.6,
+              body.map(r => (r.highlight ? "#fff4c2" : null))
+            );
+          } else if (b.type === "image") {
+            paragraph(`[obraz na stronie${b.text ? `: ${b.text}` : ""} — widoczny w kopii strony na końcu sekcji]`, 7.8, "#777777");
+          }
+        }
+      }
+    }
+
+    // Kopia strony AAA jako obraz, pocięta na strony PDF.
+    function renderScreenshot(file) {
+      let img;
+      try { img = doc.openImage(file); } catch { return; }
+      const scale = contentWidth / img.width;
+      const totalH = img.height * scale;
+      let offset = 0;
+      let first = true;
+      while (offset < totalH - 1) {
+        // Pierwszy fragment pod nagłówkiem, jeśli zmieści się sensowna część; kolejne na nowych stronach.
+        if (!first || bottomLimit() - doc.y < 200) doc.addPage();
+        const top = first && bottomLimit() - doc.y >= 200 ? doc.y : doc.page.margins.top;
+        first = false;
+        const avail = bottomLimit() - top;
+        const sliceH = Math.min(avail, totalH - offset);
+        doc.save();
+        doc.rect(left, top, contentWidth, sliceH).clip();
+        doc.image(img, left, top - offset, { width: contentWidth });
+        doc.restore();
+        offset += sliceH;
+      }
+      doc.x = left;
+      doc.y = bottomLimit();
     }
 
     const ordered = sortByPriority(results);
@@ -3573,6 +3957,22 @@ function generatePDF(results, analyzerCount, comparisonNotes = []) {
         doc.moveDown(0.1);
       });
 
+      // Pełna treść strony AAA i podstron.
+      if ((item.aaaContent || []).length || (item.aaaSubpages || []).length) {
+        doc.addPage();
+        heading(`TREŚĆ STRONY AAA — J${item.jno}`, 13);
+        paragraph("Fakt: tekst źródłowy ze strony AAA w oryginalnej kolejności i języku. Usunięto tylko adresy IP, URL-e i tokeny. Wiersze wyróżnione kolorem na stronie oznaczono słownie.", 8.3, "#555555");
+        doc.moveDown(0.3);
+        renderContent(item.aaaContent || []);
+
+        for (const sub of item.aaaSubpages || []) {
+          doc.addPage();
+          heading(`PODSTRONA AAA: ${sub.title}`, 12);
+          if (sub.note) paragraph(sub.note, 8.5, "#777777");
+          renderContent(sub.sections || []);
+        }
+      }
+
       // Wykresy źródłowe AAA z odczytem lokalnym.
       if (item.chartFiles.length) {
         doc.addPage();
@@ -3633,6 +4033,18 @@ function generatePDF(results, analyzerCount, comparisonNotes = []) {
           } catch {}
         });
       }
+    }
+
+    // ======================================================
+    // KOPIE STRON AAA (obraz)
+    // ======================================================
+
+    for (const item of ordered) {
+      if (!item.aaaScreenshot || !fs.existsSync(item.aaaScreenshot)) continue;
+      doc.addPage();
+      heading(`KOPIA STRONY AAA — J${item.jno} (${item.alertName})`, 13);
+      paragraph("Zrzut całej strony AAA w chwili analizy, z obrazkami i wykresami. Pocięty na kolejne strony.", 8.3, "#555555");
+      renderScreenshot(item.aaaScreenshot);
     }
 
     // ======================================================
@@ -3773,6 +4185,7 @@ function generatePDF(results, analyzerCount, comparisonNotes = []) {
       "Czas od ostatniego połączenia liczony względem zegara komputera generującego raport; strefa czasowa dashboardu nie jest weryfikowana.",
       `Odczyt AI z obrazów (AAA_VISION): ${process.env.AAA_VISION === "1" ? "WŁĄCZONY — obrazy wysłano do usługi zewnętrznej za zgodą użytkownika" : "wyłączony — żadne obrazy nie opuściły komputera"}.`,
       "Nie zweryfikowano: stanu aparatów na miejscu, historii serwisowej, przyczyn usterek. Każda przyczyna jest hipotezą do potwierdzenia pomiarem przez FSE.",
+      "Treść stron AAA odczytano z drzewa strony (DOM) bez klikania: sekcje zwinięte lub ukryte na stronie nie są uwzględnione. Podstrony otwierane tylko przy AAA_FOLLOW_LINKS=1 (linki z tej samej domeny, bez linków-akcji).",
       "Tryb tylko do odczytu: agent nie wykonał Save, Apply, zmian konfiguracji, adjustmentów, resetów ani komend serwisowych."
     ].forEach(t => { paragraph(`• ${t}`, 8.8); doc.moveDown(0.15); });
 
@@ -4023,6 +4436,12 @@ async function runAgentInner() {
 
       serviceDocuments: [],
 
+      aaaContent: [],
+
+      aaaSubpages: [],
+
+      aaaScreenshot: "",
+
       error: ""
     };
 
@@ -4261,6 +4680,35 @@ async function runAgentInner() {
         }
 
         // ====================================================
+        // PEŁNA TREŚĆ STRONY AAA + PODSTRONY + KOPIA OBRAZU
+        // ====================================================
+
+        result.aaaContent =
+          await extractAAAContent(
+            aaaPage
+          );
+
+        result.aaaSubpages =
+          await extractSubpages(
+            context,
+            aaaPage
+          );
+
+        if (process.env.AAA_SCREENSHOT !== "0") {
+          const shot = path.join(alertDir, "aaa_strona.png");
+          await aaaPage
+            .screenshot({ path: shot, fullPage: true })
+            .then(() => { result.aaaScreenshot = shot; })
+            .catch(() => {});
+        }
+
+        console.log(
+          `Treść AAA: ${result.aaaContent.reduce((n, s) => n + s.blocks.length, 0)} bloków` +
+          (result.aaaSubpages.length ? `, podstrony: ${result.aaaSubpages.length}` : "") +
+          (result.aaaScreenshot ? ", kopia strony zapisana" : "")
+        );
+
+        // ====================================================
         // TECHNICAL JSON
         // ====================================================
 
@@ -4309,7 +4757,13 @@ async function runAgentInner() {
                 result.chartData,
 
               serviceDocuments:
-                result.serviceDocuments
+                result.serviceDocuments,
+
+              aaaContent:
+                result.aaaContent,
+
+              aaaSubpages:
+                result.aaaSubpages
             },
             null,
             2
@@ -4453,6 +4907,12 @@ async function runAgentInner() {
 
               serviceDocuments:
                 r.serviceDocuments,
+
+              aaaContent:
+                r.aaaContent,
+
+              aaaSubpages:
+                r.aaaSubpages,
 
               analysis:
                 r.analysis,
@@ -4620,6 +5080,10 @@ module.exports = {
   parseUsDateTime,
   titleJnoCheck,
   chartKind,
+  collectPageBlocksInBrowser,
+  sanitizeBlocks,
+  aaaContentFacts,
+  extractSubpages,
   PDF_FILE,
   OUTPUT_DIR
 };

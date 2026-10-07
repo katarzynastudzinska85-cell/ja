@@ -55,3 +55,23 @@ test("Kolor alertu nie wyznacza priorytetu", () => {
   assert.notStrictEqual(a.priority, "POMARAŃCZOWY");
   assert.ok(["WYSOKI", "ŚREDNI", "ZDALNIE", "NISKI"].includes(a.priority));
 });
+
+test("Treść AAA: wyróżniony wiersz tabeli staje się faktem, nagłówek z kolorowego wiersza", () => {
+  const blocks = agent.sanitizeBlocks([
+    { type: "heading", level: 3, text: "Processed Troubleshooting Guidance -- 76000981" },
+    { type: "table", caption: "", rows: [
+      { cells: ["Guidance (NEW)", "Noise %"], header: false, bg: "rgb(51, 68, 204)" },
+      { cells: ["E: Preliminary Well Wash aspirate dispense actual volume", "8.33"], header: false, bg: "rgb(255, 255, 0)" },
+      { cells: ["F: Preliminary Well Wash level sense", "3.45"], header: false, bg: "" }
+    ] },
+    { type: "para", text: "Save" },
+    { type: "para", text: "Serwer 10.1.2.3" }
+  ]);
+  assert.strictEqual(blocks.length, 3, "samo słowo przycisku usunięte");
+  assert.strictEqual(blocks[1].rows[0].header, true);
+  assert.strictEqual(blocks[1].rows[1].highlight, "żółte");
+  assert.match(blocks[2].text, /\[IP\]/);
+  const facts = agent.aaaContentFacts({ aaaContent: [{ source: "strona AAA", blocks }] });
+  assert.strictEqual(facts.length, 1);
+  assert.match(facts[0], /Noise %: 8.33/);
+});

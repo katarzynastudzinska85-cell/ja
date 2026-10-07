@@ -23,7 +23,11 @@ i tworzy raport PDF po polsku. Działa tylko w trybie odczytu. Zasady analizy: `
 4. Wynik: folder `aaa_output_live`
    - `Raport_Serwisowy_eConnectivity_LIVE_V3.pdf` — raport,
    - `Service_Triage_Data_LIVE_V3.json` — dane,
-   - podfoldery aparatów z obrazami wykresów.
+   - podfoldery aparatów z obrazami wykresów, kopią strony AAA (`aaa_strona.png`) i danymi (`data.json`).
+
+Raport zawiera dla każdego alertu pełną treść strony AAA (rozdział „Treść strony AAA”):
+teksty, tabele (wiersze wyróżnione kolorem oznaczone słownie), listy kroków z numeracją 1. / a. / i.,
+a na końcu kopię całej strony jako obraz.
 
 ## Gdy coś nie działa
 
@@ -38,6 +42,16 @@ i tworzy raport PDF po polsku. Działa tylko w trybie odczytu. Zasady analizy: `
 - `AAA_VISION=1` i `ANTHROPIC_API_KEY` — odczyt wykresów przez AI. **Wysyła obrazy wykresów na zewnątrz**,
   domyślnie wyłączone (CLAUDE.md, rozdz. 2).
 - `AAA_LOCAL_CHARTS=0` — wyłącza lokalny odczyt wartości z wykresów.
+- `AAA_FOLLOW_LINKS=1` — otwiera też podstrony podlinkowane na stronie AAA (np. TD-016837) i dodaje ich treść do raportu.
+  Tylko linki z tej samej domeny, maks. 8 na alert, z pominięciem linków-akcji (Save, Apply, Run, Reset, Delete, logowanie).
+  Domyślnie wyłączone. Dokumenty PDF są tylko odnotowane, bez treści.
+- `AAA_SCREENSHOT=0` — bez kopii strony AAA jako obrazu.
+
+Jak ustawić opcję w PowerShell (na jedno uruchomienie):
+
+```
+$env:AAA_FOLLOW_LINKS="1"; npm start
+```
 
 ## Nie udostępniaj
 

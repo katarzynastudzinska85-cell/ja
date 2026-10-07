@@ -39,3 +39,15 @@ Raport:
 - Jedna wersja w nazwie: v3.
 
 Testy: `npm test` (funkcje bez przeglądarki).
+
+## Skrypt v3.2 (07.10.2026) — pełna treść stron AAA
+
+- Raport zawiera pełną treść strony AAA każdego alertu: pola tekstowe, nagłówki, akapity, tabele,
+  listy kroków z oryginalną numeracją (1. / a. / i.), także z ramek strony. Dlaczego: FSE potrzebuje
+  wskazówek AAA (np. „Analyzer Fluidics Troubleshooting”) w raporcie, nie tylko w przeglądarce.
+- Wiersze tabel wyróżnione kolorem przez AAA (np. Intellicheck „Investigate”) oznaczone słownie
+  i dodane jako Fakt; dla alertów bez dedykowanych reguł podnoszą priorytet do ŚREDNI (odchylenie
+  wskazane przez źródło), zamiast ZDALNIE.
+- Kopia całej strony AAA jako obraz na końcu raportu (`AAA_SCREENSHOT=0` wyłącza).
+- Podstrony z linków AAA (opt-in `AAA_FOLLOW_LINKS=1`): tylko ta sama domena, GET, bez linków-akcji.
+- Same słowa przycisków (Save, Run…) nie trafiają do treści.
