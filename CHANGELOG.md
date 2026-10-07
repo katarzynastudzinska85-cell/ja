@@ -51,3 +51,9 @@ Testy: `npm test` (funkcje bez przeglądarki).
 - Kopia całej strony AAA jako obraz na końcu raportu (`AAA_SCREENSHOT=0` wyłącza).
 - Podstrony z linków AAA (opt-in `AAA_FOLLOW_LINKS=1`): tylko ta sama domena, GET, bez linków-akcji.
 - Same słowa przycisków (Save, Run…) nie trafiają do treści.
+
+## Skrypt v3.3 (07.10.2026) — czerwone alerty
+
+- Dashboard: agent pomijał czerwone komórki (brał tylko klasy O i Y), więc nie otwierał ich AAA.
+  Teraz bierze też klasę R/Red albo czerwone tło komórki (status RED).
+- Treść AAA: czerwony tekst w tabelach i akapitach oznaczany słownie i dodawany jako Fakt.

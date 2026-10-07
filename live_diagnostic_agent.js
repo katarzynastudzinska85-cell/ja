@@ -682,9 +682,15 @@ async function waitForDashboardStable(
                 .split(/\s+/)
                 .filter(Boolean);
 
+            const bg = (getComputedStyle(cell).backgroundColor.match(/\d+/g) || []).map(Number);
+            const redBg = bg.length >= 3 && bg[0] > 190 && bg[1] < 90 && bg[2] < 90;
+
             if (
               classes.includes("O") ||
-              classes.includes("Y")
+              classes.includes("Y") ||
+              classes.includes("R") ||
+              classes.includes("Red") ||
+              redBg
             ) {
               alertCount++;
             }
@@ -838,6 +844,17 @@ async function inventoryDashboard(
         ) {
           status =
             "YELLOW";
+        }
+
+        // Czerwone komórki: klasa R/Red albo czerwone tło (gdy klasa ma inną nazwę).
+        const bg = (getComputedStyle(cell).backgroundColor.match(/\d+/g) || []).map(Number);
+        if (
+          classes.includes("R") ||
+          classes.includes("Red") ||
+          (bg.length >= 3 && bg[0] > 190 && bg[1] < 90 && bg[2] < 90)
+        ) {
+          status =
+            "RED";
         }
 
         if (!status) continue;
@@ -1156,6 +1173,11 @@ function collectPageBlocksInBrowser() {
     return t;
   };
 
+  const redColor = c => {
+    const m = String(c || "").match(/(\d+),\s*(\d+),\s*(\d+)/);
+    return !!m && Number(m[1]) > 180 && Number(m[2]) < 80 && Number(m[3]) < 80;
+  };
+
   const bg = el => {
     const c = getComputedStyle(el).backgroundColor;
     return c && c !== "rgba(0, 0, 0, 0)" && c !== "transparent" ? c : "";
@@ -1187,7 +1209,9 @@ function collectPageBlocksInBrowser() {
       const cells = [...tr.cells].map(c => clean(c.innerText || c.textContent));
       if (!cells.some(Boolean)) continue;
       const rowBg = bg(tr) || [...tr.cells].map(bg).find(Boolean) || "";
-      rows.push({ cells, header: [...tr.cells].every(c => c.tagName === "TH"), bg: rowBg });
+      const fg = [tr, ...tr.cells, ...tr.querySelectorAll("span, font, b, strong")]
+        .map(e => getComputedStyle(e).color).find(c => redColor(c)) || "";
+      rows.push({ cells, header: [...tr.cells].every(c => c.tagName === "TH"), bg: rowBg, fg });
     }
     return rows;
   }
@@ -1237,7 +1261,8 @@ function collectPageBlocksInBrowser() {
         const fw = Number(getComputedStyle(el).fontWeight) || 400;
         const fs = parseFloat(getComputedStyle(el).fontSize) || 12;
         const looksHeading = t.length <= 90 && !/[.:]$/.test(t) && (fw >= 600 || fs >= 16);
-        blocks.push(looksHeading ? { type: "heading", level: fs >= 20 ? 2 : 3, text: t } : { type: "para", text: t });
+        const red = redColor(getComputedStyle(el).color) || redColor(bg(el));
+        blocks.push(looksHeading ? { type: "heading", level: fs >= 20 ? 2 : 3, text: t, red } : { type: "para", text: t, red });
       }
       return;
     }
@@ -1292,7 +1317,7 @@ function sanitizeBlocks(blocks) {
         ...b,
         caption: cut(b.caption),
         rows: b.rows.map((r, i) => {
-          const highlight = r.header ? "" : isHighlightColor(r.bg);
+          const highlight = r.header ? "" : (isHighlightColor(r.bg) || (r.fg ? "czerwony tekst" : ""));
           // Pierwszy wiersz z kolorowym (nie wyróżniającym) tłem pełni rolę nagłówka, np. niebieski pasek.
           const header = r.header || (i === 0 && b.rows.length > 1 && !!r.bg && !highlight);
           return { cells: r.cells.map(cut), header, highlight: header ? "" : highlight };
@@ -1322,12 +1347,14 @@ function aaaContentFacts(result) {
     let lastHeading = "";
     for (const b of section.blocks) {
       if (b.type === "heading") lastHeading = b.text;
+      if ((b.type === "para" || b.type === "heading") && b.red) facts.push(`AAA wyróżnia na czerwono: „${b.text}”.`);
       if (b.type !== "table") continue;
       const header = b.rows.find(r => r.header) || b.rows[0];
       for (const r of b.rows) {
         if (!r.highlight || r === header) continue;
+        if (!r.cells.slice(1).some(c => c && c.trim())) continue; // sam kolorowy znacznik bez danych
         const pairs = r.cells.map((c, i) => (header && header !== r && header.cells[i] && i > 0 ? `${header.cells[i]}: ${c}` : c)).filter(Boolean);
-        facts.push(`AAA wyróżnia (${r.highlight} tło) w tabeli „${b.caption || lastHeading || "bez tytułu"}”: ${pairs.join("; ")}.`);
+        facts.push(`AAA wyróżnia (${r.highlight === "czerwony tekst" ? r.highlight : `${r.highlight} tło`}) w tabeli „${b.caption || lastHeading || "bez tytułu"}”: ${pairs.join("; ")}.`);
       }
     }
   }
@@ -3790,7 +3817,7 @@ function generatePDF(results, analyzerCount, comparisonNotes = []) {
               doc.x = left;
               doc.y = y + h + 4;
             } else {
-              paragraph(b.text, 8.8, "#222222");
+              paragraph(b.red ? `[wyróżnione na czerwono] ${b.text}` : b.text, 8.8, b.red ? "#b00000" : "#222222");
             }
           } else if (b.type === "list") {
             doc.moveDown(0.1);
@@ -3812,7 +3839,7 @@ function generatePDF(results, analyzerCount, comparisonNotes = []) {
               body.map(r => {
                 const cells = r.cells.slice(0, n);
                 while (cells.length < n) cells.push("");
-                if (r.highlight) cells[0] = `[wyróżnione na stronie: ${r.highlight} tło] ${cells[0]}`;
+                if (r.highlight) cells[0] = `[wyróżnione na stronie: ${r.highlight === "czerwony tekst" ? r.highlight : `${r.highlight} tło`}] ${cells[0]}`;
                 return cells;
               }),
               7.6,
@@ -4334,7 +4361,7 @@ async function runAgentInner() {
     );
 
   console.log(
-    `Aktywne alerty O/Y: ${alerts.length}`
+    `Aktywne alerty (czerwone/pomarańczowe/żółte): ${alerts.length}`
   );
 
   const results = [];
@@ -5084,6 +5111,7 @@ module.exports = {
   sanitizeBlocks,
   aaaContentFacts,
   extractSubpages,
+  inventoryDashboard,
   PDF_FILE,
   OUTPUT_DIR
 };

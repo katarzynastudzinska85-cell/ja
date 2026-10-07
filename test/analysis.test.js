@@ -75,3 +75,17 @@ test("Treść AAA: wyróżniony wiersz tabeli staje się faktem, nagłówek z ko
   assert.strictEqual(facts.length, 1);
   assert.match(facts[0], /Noise %: 8.33/);
 });
+
+test("Czerwony tekst w tabeli AAA staje się faktem", () => {
+  const blocks = agent.sanitizeBlocks([
+    { type: "table", caption: "", rows: [
+      { cells: ["Guidance", "Noise %"], header: true, bg: "" },
+      { cells: ["D: Final Well Wash", "12.5"], header: false, bg: "", fg: "rgb(255, 0, 0)" }
+    ] },
+    { type: "para", text: "Investigate: Signal Reagent", red: true }
+  ]);
+  const facts = agent.aaaContentFacts({ aaaContent: [{ source: "strona AAA", blocks }] });
+  assert.strictEqual(facts.length, 2);
+  assert.match(facts[0], /czerwony tekst/);
+  assert.match(facts[1], /Investigate: Signal Reagent/);
+});
