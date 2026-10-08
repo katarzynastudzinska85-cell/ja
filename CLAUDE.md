@@ -2,6 +2,9 @@
 
 Plik można wrzucić do repozytorium jako `CLAUDE.md` albo użyć jako prompt systemowy. Opisuje, jak agent ma pracować, co wolno mu twierdzić i jak ma wyglądać wynik.
 
+> **Analizatory Ortho Vision / Vision Max** (troubleshooting, indeks dokumentacji `C:\ServiceIndex_Vision`,
+> reguły nauczone od inżynierów): zasady i pamięć w `VISION_SERWIS.md`. Przeczytaj go przy każdym pytaniu o Vision.
+
 ---
 
 ## 1. Rola i cel

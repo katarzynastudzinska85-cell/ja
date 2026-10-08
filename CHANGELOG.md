@@ -57,3 +57,11 @@ Testy: `npm test` (funkcje bez przeglądarki).
 - Dashboard: agent pomijał czerwone komórki (brał tylko klasy O i Y), więc nie otwierał ich AAA.
   Teraz bierze też klasę R/Red albo czerwone tło komórki (status RED).
 - Treść AAA: czerwony tekst w tabelach i akapitach oznaczany słownie i dodawany jako Fakt.
+
+## Vision v1 (08.10.2026)
+
+- Dodano `VISION_SERWIS.md`: pamięć asystenta Ortho Vision / Vision Max (lokalizacja indeksu, sposób użycia,
+  stały układ odpowiedzi troubleshooting, sekcja reguł nauczonych z datą).
+- Dodano `vision_index/`: `build_index.py` (PDF przez pdftotext ze stronami, HTML → tekst, przyrostowo),
+  `build_db.py` (SQLite FTS5, wyszukiwanie bez polskich znaków), `szukaj.py`, `zbuduj.cmd`, `szukaj.cmd`.
+- `CLAUDE.md`: odnośnik do `VISION_SERWIS.md`.

@@ -70,3 +70,12 @@ Uruchamiaj przez `node live_diagnostic_agent.js` albo pliki `.cmd`. Do jednorazo
 ## Nie udostępniaj
 
 `session.json` (zapisana sesja logowania), pliku Excel ani folderu `aaa_output_live` — zawierają dane klientów.
+
+## Indeks dokumentacji Ortho Vision
+
+Skrypty w `vision_index\`, zasady i pamięć asystenta w `VISION_SERWIS.md`.
+
+1. Jednorazowo: `winget install oschwartz10612.Poppler` (pdftotext).
+2. Dwuklik `vision_index\zbuduj.cmd` — czyta `C:\Users\RafałMotylski\OneDrive - Altium\Dokume` (bez zmian)
+   i tworzy indeks w `C:\ServiceIndex_Vision`. Kolejne uruchomienia przetwarzają tylko nowe/zmienione pliki.
+3. Szukanie: w folderze `vision_index` wpisz `szukaj.cmd 5003-01` albo `szukaj.cmd --help`.
