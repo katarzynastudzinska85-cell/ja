@@ -30,6 +30,16 @@ Raport zawiera dla każdego alertu pełną treść strony AAA (rozdział „Tre�
 teksty, tabele (wiersze wyróżnione kolorem oznaczone słownie), listy kroków z numeracją 1. / a. / i.,
 a na końcu kopię całej strony jako obraz.
 
+## Szukanie klienta po numerze J
+
+Dwuklik nie wystarczy — numer trzeba podać. W PowerShell, w folderze skryptu:
+
+```
+node znajdz.js 76000978
+```
+
+Można podać kilka numerów naraz: `node znajdz.js 76000978 46001812`. Dane pochodzą z lokalnego pliku Excel.
+
 ## Gdy coś nie działa
 
 - **Edge się nie otwiera:** sprawdź, gdzie jest `msedge.exe`. Jeśli w `C:\Program Files\Microsoft\Edge\Application\`,

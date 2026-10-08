@@ -5112,6 +5112,11 @@ module.exports = {
   aaaContentFacts,
   extractSubpages,
   inventoryDashboard,
+  loadAnalyzerDatabase,
+  findAnalyzer,
+  getAnalyzerModel,
+  getLocation,
+  EXCEL_FILE,
   PDF_FILE,
   OUTPUT_DIR
 };
